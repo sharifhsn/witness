@@ -8,6 +8,9 @@
 #'   POST https://api.usaspending.gov/api/v2/search/spending_by_award/
 #'   No authentication required. Rate limit: ~1 req/2 sec (enforced by build_request()).
 
+# API constraints (documented at https://api.usaspending.gov/)
+USASPENDING_MAX_PAGE_SIZE <- 100L
+
 # Award type codes that constitute grants and cooperative agreements
 GRANT_AWARD_CODES <- c("02", "03", "04", "05")
 
@@ -28,6 +31,7 @@ USASPENDING_FIELDS <- c(
 #' Build the JSON body for one USAspending page query.
 #' @export
 build_usaspending_body <- function(agency_name, start_date, end_date, page, limit = 100L) {
+  limit <- min(limit, USASPENDING_MAX_PAGE_SIZE)
   list(
     filters = list(
       award_type_codes = GRANT_AWARD_CODES,
@@ -162,7 +166,7 @@ fetch_usaspending <- function(
   limit       = 100L
 ) {
   end_date <- end_date %||% format(Sys.Date(), "%Y-%m-%d")
-  limit    <- min(limit, 100L)  # USAspending API hard cap is 100 per page
+  limit    <- min(limit, USASPENDING_MAX_PAGE_SIZE)
 
   log_event(
     sprintf(

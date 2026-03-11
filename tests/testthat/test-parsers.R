@@ -41,6 +41,7 @@ suppressMessages({
   source(file.path(.root, "R/scrape_nih.R"))
   source(file.path(.root, "R/scrape_nsf.R"))
   source(file.path(.root, "R/transform.R"))
+  source(file.path(.root, "R/fetch_usaspending.R"))
 })
 
 # ---------------------------------------------------------------------------
@@ -869,4 +870,76 @@ test_that("integration: multiple notices and awards produce correct row count", 
   untracked <- dplyr::filter(result, discrepancy_type == "untracked")
   expect_equal(nrow(untracked), 1L)
   expect_equal(untracked$grant_number, "GR-D")
+})
+
+# ===========================================================================
+# Robustness guards — prevent recurring bug classes
+# ===========================================================================
+
+test_that("_targets.R declares all packages used by R/ modules", {
+  # Parse the packages vector from _targets.R
+  targets_src <- readLines(file.path(.root, "_targets.R"))
+  pkg_lines <- targets_src[grep("packages\\s*=\\s*c\\(", targets_src):
+                           grep("^\\)\\)", targets_src)[1]]
+  declared <- unlist(regmatches(pkg_lines, gregexpr('"[^"]+"', pkg_lines)))
+  declared <- gsub('"', '', declared)
+
+  # Scan R/ files for explicit namespace calls (pkg::fn)
+  r_files <- list.files(file.path(.root, "R"), pattern = "[.]R$", full.names = TRUE)
+  all_code <- unlist(lapply(r_files, readLines))
+  ns_calls <- regmatches(all_code, gregexpr("[a-zA-Z][a-zA-Z0-9.]+::", all_code))
+  used_pkgs <- unique(gsub("::", "", unlist(ns_calls)))
+  # Exclude base/stats/datasets (always available) and the package itself
+  base_pkgs <- c("base", "stats", "datasets", "utils", "methods", "grDevices", "graphics")
+  used_pkgs <- setdiff(used_pkgs, base_pkgs)
+
+  missing <- setdiff(used_pkgs, declared)
+  expect_true(
+    length(missing) == 0L,
+    info = sprintf("Packages used in R/ but not declared in _targets.R: %s",
+                   paste(missing, collapse = ", "))
+  )
+})
+
+test_that("no R files use NA_Date_ (not a real R constant)", {
+  r_files <- list.files(file.path(.root, "R"), pattern = "[.]R$", full.names = TRUE)
+  for (f in r_files) {
+    lines <- readLines(f)
+    bad <- grep("\\bNA_Date_\\b", lines)
+    expect_true(
+      length(bad) == 0L,
+      info = sprintf("%s uses NA_Date_ on line(s) %s — use as.Date(NA) instead",
+                     basename(f), paste(bad, collapse = ", "))
+    )
+  }
+})
+
+test_that("USAspending limit never exceeds API max page size", {
+  # build_usaspending_body default should be <= USASPENDING_MAX_PAGE_SIZE
+  body <- build_usaspending_body("test", "2025-01-01", "2025-12-31", 1L)
+  expect_true(body$limit <= USASPENDING_MAX_PAGE_SIZE)
+
+  # Even if caller passes a huge limit, it gets capped
+  body_large <- build_usaspending_body("test", "2025-01-01", "2025-12-31", 1L, limit = 9999L)
+  expect_true(body_large$limit <= USASPENDING_MAX_PAGE_SIZE)
+})
+
+test_that("NIH pagination respects offset cap", {
+  # Verify the constant exists and is 14999
+  expect_equal(NIH_MAX_OFFSET, 14999L)
+  # Verify page size doesn't exceed API limit
+  expect_true(NIH_PAGE_SIZE <= 500L)
+})
+
+test_that("no R files use req_body_raw with jsonlite::toJSON", {
+  r_files <- list.files(file.path(.root, "R"), pattern = "[.]R$", full.names = TRUE)
+  for (f in r_files) {
+    lines <- readLines(f)
+    bad <- grep("req_body_raw.*toJSON|toJSON.*req_body_raw", lines)
+    expect_true(
+      length(bad) == 0L,
+      info = sprintf("%s uses req_body_raw+toJSON on line(s) %s — use req_body_json() instead",
+                     basename(f), paste(bad, collapse = ", "))
+    )
+  }
 })

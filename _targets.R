@@ -16,7 +16,8 @@ tar_option_set(packages = c(
   "arrow",      # export target (Parquet)
   "ggplot2",    # visualize.R charts
   "scales",     # axis label formatting
-  "maps"        # state choropleth base data
+  "maps",       # state choropleth base data
+  "mapproj"     # coord_map() projection support
 ))
 
 # Load custom functions
