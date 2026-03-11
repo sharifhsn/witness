@@ -174,7 +174,7 @@ summarize_discrepancies <- function(joined_df) {
       else
         NA_character_,
       org_name = if ("org_name" %in% names(notices))
-        .normalise_text(org_name)
+        .normalise_org(org_name)
       else
         NA_character_
     )
@@ -190,9 +190,9 @@ summarize_discrepancies <- function(joined_df) {
       else
         NA_character_,
       org_name = if ("org_name" %in% names(awards))
-        .normalise_text(org_name)
+        .normalise_org(org_name)
       else if ("recipient_name" %in% names(awards))
-        .normalise_text(recipient_name)
+        .normalise_org(recipient_name)
       else
         NA_character_,
       total_outlays = if ("total_outlays" %in% names(awards))
@@ -210,6 +210,32 @@ summarize_discrepancies <- function(joined_df) {
 # Used for both grant numbers ("r01 ai123" → "R01 AI123") and org names.
 .normalise_text <- function(x) {
   stringr::str_to_upper(stringr::str_squish(x))
+}
+
+# Aggressive org name normalizer for fuzzy join pre-processing.
+# Strips suffixes, campuses, hyphens, and punctuation that cause
+# identical institutions to mismatch (e.g. "CARNEGIE-MELLON UNIVERSITY"
+# vs "CARNEGIE MELLON UNIVERSITY", "ARIZONA STATE UNIVERSITY-TEMPE CAMPUS"
+# vs "ARIZONA STATE UNIVERSITY").
+.normalise_org <- function(x) {
+  x <- stringr::str_to_upper(stringr::str_squish(x))
+  # Strip parenthetical campus/location qualifiers
+  x <- gsub("\\s*\\([^)]*\\)", "", x)
+  # Normalize hyphens to spaces (before suffix stripping)
+  x <- gsub("-", " ", x)
+  # Strip "AT <CITY>" suffix after org name
+  x <- gsub("\\s+AT\\s+[A-Z].*$", "", x)
+  # Strip campus/location suffixes (e.g. "TEMPE CAMPUS", "MAIN CAMPUS")
+  x <- gsub("\\s+[A-Z]+\\s+CAMPUS$", "", x)
+  # Strip trailing legal suffixes
+  x <- gsub(",?\\s*(THE|INC\\.?|LLC\\.?|CORP\\.?|LTD\\.?|CO\\.?)\\s*$", "", x)
+  # Strip leading "THE "
+  x <- gsub("^THE\\s+", "", x)
+  # Strip departmental qualifiers after main org name
+  x <- gsub("\\s+(HEALTH SCIENCES|MEDICAL CAMPUS|MEDICAL CENTER|TEACHERS COLLEGE|SCHOOL OF MEDICINE)$", "", x)
+  # Remove remaining punctuation (except spaces)
+  x <- gsub("[.,;:'\"!]", "", x)
+  stringr::str_squish(x)
 }
 
 # Exact join on grant_number. Note: NIH project_num (e.g., "5R01AI012345-10")

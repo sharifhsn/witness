@@ -53,3 +53,37 @@ log_event <- function(msg, level = "INFO") {
 #' Null-coalescing operator (canonical definition for all modules)
 #' @export
 `%||%` <- function(a, b) if (!is.null(a)) a else b
+
+#' Log data quality summary for a tibble
+#'
+#' Reports row count, NA rates, and any flag columns to the log.
+#' Called at validation boundaries to create an audit trail.
+#'
+#' @param df A tibble. @param label Human-readable name for log context.
+#' @return Invisible df (pass-through for piping).
+#' @export
+log_quality_summary <- function(df, label) {
+  n <- nrow(df)
+  na_pcts <- vapply(df, function(col) round(100 * mean(is.na(col)), 1), numeric(1))
+  high_na <- na_pcts[na_pcts > 5]
+
+  log_event(sprintf("QA [%s]: %d rows, %d columns", label, n, ncol(df)))
+  if (length(high_na) > 0) {
+    log_event(sprintf("QA [%s]: high NA columns: %s",
+      label,
+      paste(sprintf("%s=%.1f%%", names(high_na), high_na), collapse = ", ")
+    ), "WARN")
+  }
+
+  # Report any flag_ columns
+  flag_cols <- grep("^flag_", names(df), value = TRUE)
+  for (fc in flag_cols) {
+    n_flagged <- sum(df[[fc]], na.rm = TRUE)
+    if (n_flagged > 0) {
+      log_event(sprintf("QA [%s]: %s = %d rows (%.1f%%)",
+        label, fc, n_flagged, 100 * n_flagged / n), "WARN")
+    }
+  }
+
+  invisible(df)
+}

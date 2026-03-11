@@ -78,8 +78,18 @@ scrape_nih <- function(from_date = "2025-01-01", to_date = NULL, max_records = 1
   }
 
   out <- dplyr::bind_rows(purrr::compact(results)) |>
-    dplyr::distinct(grant_number, .keep_all = TRUE)  # pagination overlap dedup
+    dplyr::distinct(grant_number, .keep_all = TRUE) |>  # pagination overlap dedup
+    dplyr::filter(!is_active | is.na(is_active))         # exclude still-active projects
+
+  # VA grants lack institute — derive from project_num prefix or mark "VA"
+  out <- out |>
+    dplyr::mutate(
+      institute = dplyr::if_else(is.na(institute) & grepl("^VA", grant_number),
+                                 "VA", institute)
+    )
+
   if (nrow(out) > max_records) out <- dplyr::slice_head(out, n = max_records)
+  log_event(sprintf("NIH scrape complete: %d records after dedup and filtering", nrow(out)))
   out
 }
 

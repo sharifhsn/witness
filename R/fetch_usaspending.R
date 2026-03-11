@@ -128,8 +128,10 @@ fetch_usaspending_page <- function(body) {
     cfdas[i]     <- r[["CFDA Number"]]           %||% NA_character_
   }
 
-  # Strip "DESCRIPTION:" prefix from descriptions (USAspending ETL artifact)
-  descs <- sub("^DESCRIPTION:\\s*", "", descs)
+  # Clean description artifacts from USAspending ETL
+  descs <- sub("^DESCRIPTION:\\s*", "", descs)        # field label prefix (29% of records)
+  descs <- gsub("<!\\[CDATA\\[|\\]\\]>", "", descs)   # XML CDATA wrappers
+  descs <- gsub("<[^>]+>", "", descs)                  # strip HTML tags
 
   rows <- dplyr::tibble(
     grant_number   = grant_ids,

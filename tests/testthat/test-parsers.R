@@ -954,10 +954,92 @@ test_that("no R files use req_body_raw with jsonlite::toJSON", {
 })
 
 test_that("NIH scraper deduplicates by grant_number", {
-  # scrape_nih must call distinct(grant_number) to handle pagination overlap
   lines <- readLines(file.path(.root, "R/scrape_nih.R"))
   expect_true(
     any(grepl("distinct.*grant_number", lines)),
     info = "scrape_nih.R must deduplicate by grant_number (pagination overlap bug)"
   )
+})
+
+test_that("NIH scraper filters out is_active=TRUE records", {
+  lines <- readLines(file.path(.root, "R/scrape_nih.R"))
+  expect_true(
+    any(grepl("is_active", lines) & grepl("filter", lines)),
+    info = "scrape_nih.R must filter out is_active=TRUE (they're not terminated)"
+  )
+})
+
+test_that("validate_awards adds quality flag columns", {
+  # Build minimal awards tibble
+  df <- dplyr::tibble(
+    agency_name   = c("HHS", "NSF"),
+    award_amount  = c(1000, 500),
+    total_outlays = c(-100, 900),
+    action_date   = as.Date(c("2025-01-01", "2025-06-01")),
+    end_date      = as.Date(c("2026-01-01", "2026-06-01")),
+    grant_number  = c("G001", "G002")
+  )
+  result <- suppressMessages(validate_awards(df))
+  expect_true("flag_negative_outlay" %in% names(result))
+  expect_true("flag_over_disbursed" %in% names(result))
+  # The negative outlay should be flagged
+  expect_true(result$flag_negative_outlay[1])
+  expect_false(result$flag_negative_outlay[2])
+})
+
+test_that("org name normalizer handles campus suffixes and punctuation", {
+  source(file.path(.root, "R/transform.R"))
+  expect_equal(
+    .normalise_org("ARIZONA STATE UNIVERSITY-TEMPE CAMPUS"),
+    .normalise_org("ARIZONA STATE UNIVERSITY")
+  )
+  expect_equal(
+    .normalise_org("CARNEGIE-MELLON UNIVERSITY"),
+    .normalise_org("CARNEGIE MELLON UNIVERSITY")
+  )
+  expect_equal(
+    .normalise_org("THE BROAD INSTITUTE, INC."),
+    .normalise_org("BROAD INSTITUTE")
+  )
+  expect_equal(
+    .normalise_org("BOSTON UNIVERSITY (CHARLES RIVER CAMPUS)"),
+    .normalise_org("BOSTON UNIVERSITY")
+  )
+  expect_equal(
+    .normalise_org("AUBURN UNIVERSITY AT AUBURN"),
+    .normalise_org("AUBURN UNIVERSITY")
+  )
+})
+
+test_that("USAspending description cleaning strips HTML and CDATA", {
+  # Simulate the cleaning logic from fetch_usaspending_page
+  descs <- c(
+    "DESCRIPTION:THIS AWARD PROVIDES FUNDING",
+    "THE DIABETES <![CDATA[MATCH INITIATIVE]]>",
+    "NORMAL DESCRIPTION",
+    "<b>BOLD</b> text here"
+  )
+  descs <- sub("^DESCRIPTION:\\s*", "", descs)
+  descs <- gsub("<!\\[CDATA\\[|\\]\\]>", "", descs)
+  descs <- gsub("<[^>]+>", "", descs)
+  expect_equal(descs[1], "THIS AWARD PROVIDES FUNDING")
+  expect_equal(descs[2], "THE DIABETES MATCH INITIATIVE")
+  expect_equal(descs[3], "NORMAL DESCRIPTION")
+  expect_equal(descs[4], "BOLD text here")
+})
+
+test_that("validate_awards flags negative and over-disbursed outlays", {
+  df <- dplyr::tibble(
+    agency_name   = c("HHS", "EPA", "NSF"),
+    award_amount  = c(1000, 500, 200),
+    total_outlays = c(-100, 1000, 100),
+    action_date   = rep(as.Date("2025-01-01"), 3),
+    end_date      = rep(as.Date("2026-01-01"), 3),
+    grant_number  = c("A", "B", "C")
+  )
+  result <- suppressMessages(validate_awards(df))
+  expect_true(result$flag_negative_outlay[1])
+  expect_false(result$flag_negative_outlay[2])
+  expect_true(result$flag_over_disbursed[2])   # 1000 > 500 * 1.5
+  expect_false(result$flag_over_disbursed[3])  # 100 < 200 * 1.5
 })
