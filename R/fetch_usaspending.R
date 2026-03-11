@@ -22,8 +22,8 @@ USASPENDING_FIELDS <- c(
   "Awarding Sub Agency",
   "Award Amount",
   "Total Outlays",
-  "Period of Performance Start Date",
-  "Period of Performance Current End Date",
+  "Start Date",
+  "End Date",
   "Description",
   "CFDA Number"
 )
@@ -122,11 +122,14 @@ fetch_usaspending_page <- function(body) {
     sub_ag[i]    <- r[["Awarding Sub Agency"]]   %||% NA_character_
     amounts[i]   <- as.numeric(r[["Award Amount"]]  %||% NA_real_)
     outlays[i]   <- as.numeric(r[["Total Outlays"]] %||% NA_real_)
-    start_raw[i] <- as.character(r[["Period of Performance Start Date"]]       %||% NA_character_)
-    end_raw[i]   <- as.character(r[["Period of Performance Current End Date"]] %||% NA_character_)
+    start_raw[i] <- as.character(r[["Start Date"]]  %||% NA_character_)
+    end_raw[i]   <- as.character(r[["End Date"]]    %||% NA_character_)
     descs[i]     <- r[["Description"]]           %||% NA_character_
     cfdas[i]     <- r[["CFDA Number"]]           %||% NA_character_
   }
+
+  # Strip "DESCRIPTION:" prefix from descriptions (USAspending ETL artifact)
+  descs <- sub("^DESCRIPTION:\\s*", "", descs)
 
   rows <- dplyr::tibble(
     grant_number   = grant_ids,

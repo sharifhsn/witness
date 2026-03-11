@@ -931,6 +931,15 @@ test_that("NIH pagination respects offset cap", {
   expect_true(NIH_PAGE_SIZE <= 500L)
 })
 
+test_that("USAspending requests 'Start Date'/'End Date' (not 'Period of Performance')", {
+  # The API returns null for "Period of Performance Start Date" / "...Current End Date"
+  # but populates "Start Date" / "End Date". This was a root cause of 100% missing dates.
+  expect_true("Start Date" %in% USASPENDING_FIELDS)
+  expect_true("End Date" %in% USASPENDING_FIELDS)
+  expect_false("Period of Performance Start Date" %in% USASPENDING_FIELDS)
+  expect_false("Period of Performance Current End Date" %in% USASPENDING_FIELDS)
+})
+
 test_that("no R files use req_body_raw with jsonlite::toJSON", {
   r_files <- list.files(file.path(.root, "R"), pattern = "[.]R$", full.names = TRUE)
   for (f in r_files) {

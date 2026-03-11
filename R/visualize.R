@@ -142,7 +142,7 @@ plot_outlay_scatter <- function(discrepancies) {
       stats::setNames(c("Active Despite Terminated", "Possible Freeze", "Untracked", "Normal")),
       name = "Discrepancy Type"
     ) +
-    ggplot2::scale_x_continuous(labels = scales::label_dollar(scale = 1e-6, suffix = "M")) +
+    ggplot2::scale_x_continuous(labels = scales::label_dollar(scale_cut = scales::cut_short_scale())) +
     ggplot2::scale_y_continuous(labels = scales::label_percent()) +
     ggplot2::geom_hline(yintercept = 0.10, linetype = "dashed", color = "grey50", linewidth = 0.5) +
     ggplot2::annotate("text", x = Inf, y = 0.12, label = "Freeze threshold (10%)",
