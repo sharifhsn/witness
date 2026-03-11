@@ -1,0 +1,501 @@
+{
+  "api_endpoint": {
+    "url": "https://api.reporter.nih.gov/v2/projects/search",
+    "method": "POST",
+    "content_type": "application/json",
+    "rate_limit": "1 request/second recommended",
+    "large_jobs": "weekends or 9PM-5AM EST"
+  },
+  "request_schema": {
+    "criteria": {
+      "type": "object",
+      "description": "Search filters for projects",
+      "properties": {
+        "include_active_projects": {
+          "type": "boolean",
+          "description": "true=include active, false=exclude active (get inactive only)",
+          "example": false
+        },
+        "project_end_date": {
+          "type": "object",
+          "description": "Filter by project end date range",
+          "properties": {
+            "from_date": {
+              "type": "string",
+              "format": "YYYY-MM-DD",
+              "example": "2024-01-01"
+            },
+            "to_date": {
+              "type": "string",
+              "format": "YYYY-MM-DD",
+              "example": "2026-03-10"
+            }
+          }
+        },
+        "project_start_date": {
+          "type": "object",
+          "description": "Filter by project start date range",
+          "properties": {
+            "from_date": { "type": "string", "format": "YYYY-MM-DD" },
+            "to_date": { "type": "string", "format": "YYYY-MM-DD" }
+          }
+        },
+        "award_notice_date": {
+          "type": "object",
+          "description": "Filter by award notification date",
+          "properties": {
+            "from_date": { "type": "string", "format": "YYYY-MM-DD" },
+            "to_date": { "type": "string", "format": "YYYY-MM-DD" }
+          }
+        },
+        "date_added": {
+          "type": "object",
+          "description": "Filter by when project was added to Reporter database",
+          "properties": {
+            "from_date": { "type": "string", "format": "YYYY-MM-DD" },
+            "to_date": { "type": "string", "format": "YYYY-MM-DD" }
+          }
+        },
+        "fiscal_years": {
+          "type": "array",
+          "description": "Filter by fiscal year(s)",
+          "items": { "type": "integer" },
+          "example": [2024, 2025, 2026]
+        },
+        "project_nums": {
+          "type": "array",
+          "description": "Search by project number (supports wildcard *)",
+          "items": { "type": "string" },
+          "example": ["5R01AI178795-11", "5R01AI178795*"]
+        },
+        "agencies": {
+          "type": "array",
+          "description": "Filter by NIH IC/agency code",
+          "items": { "type": "string" },
+          "example": ["NIAID", "NCI", "NIDDK"]
+        },
+        "activity_codes": {
+          "type": "array",
+          "description": "Filter by award activity code",
+          "items": { "type": "string" },
+          "example": ["R01", "R35", "F32", "DP2"]
+        },
+        "award_amount_range": {
+          "type": "object",
+          "description": "Filter by total award amount",
+          "properties": {
+            "min_amount": { "type": "number", "example": 0 },
+            "max_amount": { "type": "number", "example": 50000000 }
+          }
+        },
+        "org_names": {
+          "type": "array",
+          "description": "Filter by organization name (wildcard enabled)",
+          "items": { "type": "string" },
+          "example": ["HARVARD UNIVERSITY", "MIT"]
+        },
+        "org_cities": {
+          "type": "array",
+          "description": "Filter by organization city",
+          "items": { "type": "string" },
+          "example": ["BOSTON", "NEW YORK"]
+        },
+        "org_states": {
+          "type": "array",
+          "description": "Filter by US state code",
+          "items": { "type": "string" },
+          "example": ["MA", "NY", "CA"]
+        }
+      }
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Starting record number (0-14999)",
+      "default": 0,
+      "example": 0
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Records per response (1-500)",
+      "default": 50,
+      "example": 500
+    },
+    "sort_field": {
+      "type": "string",
+      "description": "Field to sort by",
+      "example": "project_start_date"
+    },
+    "sort_order": {
+      "type": "string",
+      "enum": ["asc", "desc"],
+      "description": "Sort direction",
+      "default": "ASC"
+    },
+    "include_fields": {
+      "type": "array",
+      "description": "Return only specified fields (optional optimization)",
+      "items": { "type": "string" },
+      "example": ["project_num", "project_start_date", "project_end_date", "is_active"]
+    }
+  },
+  "response_schema": {
+    "meta": {
+      "type": "object",
+      "description": "Response metadata",
+      "properties": {
+        "search_id": {
+          "type": "string",
+          "description": "Unique search ID for this query set"
+        },
+        "total": {
+          "type": "integer",
+          "description": "Total matching records"
+        },
+        "offset": { "type": "integer" },
+        "limit": { "type": "integer" },
+        "sort_field": { "type": "string" },
+        "sort_order": { "type": "string" },
+        "sorted_by_relevance": { "type": "boolean" },
+        "properties": {
+          "type": "object",
+          "properties": {
+            "URL": {
+              "type": "string",
+              "description": "Shareable URL for these search results"
+            }
+          }
+        }
+      }
+    },
+    "results": {
+      "type": "array",
+      "description": "Array of project records",
+      "items": {
+        "type": "object",
+        "properties": {
+          "appl_id": {
+            "type": "integer",
+            "description": "Application ID"
+          },
+          "subproject_id": {
+            "type": "string",
+            "description": "Sub-project ID (if applicable)"
+          },
+          "fiscal_year": {
+            "type": "integer",
+            "description": "Fiscal year of award"
+          },
+          "project_num": {
+            "type": "string",
+            "description": "Full project number",
+            "example": "5R01AI178795-11"
+          },
+          "project_num_split": {
+            "type": "object",
+            "description": "Components of project number",
+            "properties": {
+              "appl_type_code": { "type": "string", "example": "5" },
+              "activity_code": { "type": "string", "example": "R01" },
+              "ic_code": { "type": "string", "example": "AI" },
+              "serial_num": { "type": "string", "example": "178795" },
+              "support_year": { "type": "string", "example": "11" },
+              "full_support_year": { "type": "string", "example": "11" },
+              "suffix_code": { "type": "string" }
+            }
+          },
+          "is_active": {
+            "type": "boolean",
+            "description": "Current grant status (KEY FIELD FOR TERMINATIONS)",
+            "example": false
+          },
+          "project_start_date": {
+            "type": "string",
+            "format": "ISO 8601",
+            "description": "Award start date",
+            "example": "2023-11-01T00:00:00"
+          },
+          "project_end_date": {
+            "type": "string",
+            "format": "ISO 8601",
+            "description": "Award end date (KEY FIELD FOR TRACKING TERMINATIONS)",
+            "example": "2027-10-31T00:00:00"
+          },
+          "budget_start": {
+            "type": "string",
+            "format": "ISO 8601",
+            "description": "Current budget period start"
+          },
+          "budget_end": {
+            "type": "string",
+            "format": "ISO 8601",
+            "description": "Current budget period end"
+          },
+          "award_notice_date": {
+            "type": "string",
+            "format": "ISO 8601",
+            "description": "Date award was officially notified",
+            "example": "2023-04-07T00:00:00"
+          },
+          "date_added": {
+            "type": "string",
+            "format": "ISO 8601",
+            "description": "When project was added to Reporter database",
+            "example": "2023-05-04T16:18:27"
+          },
+          "award_amount": {
+            "type": "number",
+            "description": "Total award cost"
+          },
+          "direct_cost_amt": {
+            "type": "number",
+            "description": "Direct costs portion"
+          },
+          "indirect_cost_amt": {
+            "type": "number",
+            "description": "Indirect costs portion"
+          },
+          "core_project_num": {
+            "type": "string",
+            "description": "Base project number (links all support years)",
+            "example": "R01AI178795"
+          },
+          "activity_code": {
+            "type": "string",
+            "description": "Award type code",
+            "example": "R01"
+          },
+          "award_type": {
+            "type": "string",
+            "description": "Award type indicator",
+            "example": "5"
+          },
+          "funding_mechanism": {
+            "type": "string",
+            "description": "Type of funding mechanism",
+            "example": "Non-SBIR/STTR"
+          },
+          "project_title": {
+            "type": "string",
+            "description": "Grant title"
+          },
+          "abstract_text": {
+            "type": "string",
+            "description": "Grant abstract"
+          },
+          "organization": {
+            "type": "object",
+            "description": "Funding organization information",
+            "properties": {
+              "org_name": { "type": "string", "example": "HARVARD UNIVERSITY" },
+              "org_city": { "type": "string" },
+              "org_state": { "type": "string", "example": "MA" },
+              "org_country": { "type": "string", "example": "UNITED STATES" },
+              "org_zipcode": { "type": "string" },
+              "org_duns": { "type": "array", "items": { "type": "string" } },
+              "org_ueis": { "type": "array", "items": { "type": "string" } },
+              "primary_duns": { "type": "string" },
+              "primary_uei": { "type": "string" },
+              "org_type": { "type": "string" }
+            }
+          },
+          "principal_investigators": {
+            "type": "array",
+            "description": "Project PIs",
+            "items": {
+              "type": "object",
+              "properties": {
+                "profile_id": { "type": "integer" },
+                "first_name": { "type": "string" },
+                "last_name": { "type": "string" },
+                "full_name": { "type": "string" },
+                "is_contact_pi": { "type": "boolean" },
+                "title": { "type": "string" }
+              }
+            }
+          },
+          "program_officers": {
+            "type": "array",
+            "description": "NIH program officers managing grant",
+            "items": {
+              "type": "object",
+              "properties": {
+                "first_name": { "type": "string" },
+                "last_name": { "type": "string" },
+                "full_name": { "type": "string" }
+              }
+            }
+          },
+          "agency_ic_admin": {
+            "type": "object",
+            "description": "Administering IC information",
+            "properties": {
+              "code": { "type": "string", "example": "AI" },
+              "abbreviation": { "type": "string", "example": "NIAID" },
+              "name": { "type": "string" }
+            }
+          },
+          "agency_ic_fundings": {
+            "type": "array",
+            "description": "Funding by IC",
+            "items": {
+              "type": "object",
+              "properties": {
+                "fy": { "type": "integer" },
+                "code": { "type": "string" },
+                "name": { "type": "string" },
+                "abbreviation": { "type": "string" },
+                "total_cost": { "type": "number" },
+                "direct_cost_ic": { "type": "number" },
+                "indirect_cost_ic": { "type": "number" }
+              }
+            }
+          },
+          "cfda_code": {
+            "type": "string",
+            "description": "CFDA program number"
+          },
+          "cong_dist": {
+            "type": "string",
+            "description": "Congressional district",
+            "example": "MA-07"
+          },
+          "covid_response": {
+            "type": "string",
+            "description": "COVID-19 response funding indicator"
+          },
+          "arra_funded": {
+            "type": "string",
+            "description": "ARRA stimulus funding indicator"
+          },
+          "project_detail_url": {
+            "type": "string",
+            "description": "URL to full project details page"
+          },
+          "full_study_section": {
+            "type": "object",
+            "description": "Study section information"
+          }
+        }
+      }
+    }
+  },
+  "key_fields_for_forensic_analysis": {
+    "grant_status": [
+      {
+        "field": "is_active",
+        "type": "boolean",
+        "usage": "Primary indicator: false = terminated/inactive",
+        "forensic_value": "CRITICAL"
+      },
+      {
+        "field": "project_end_date",
+        "type": "ISO 8601 timestamp",
+        "usage": "When grant was scheduled to end",
+        "forensic_value": "CRITICAL"
+      },
+      {
+        "field": "date_added",
+        "type": "ISO 8601 timestamp",
+        "usage": "When status change was recorded in database",
+        "forensic_value": "HIGH - track temporal changes"
+      }
+    ],
+    "funding_tracking": [
+      {
+        "field": "award_amount",
+        "type": "decimal",
+        "usage": "Total grant value at award",
+        "forensic_value": "HIGH - compare across renewals"
+      },
+      {
+        "field": "direct_cost_amt",
+        "type": "decimal",
+        "usage": "Direct funding",
+        "forensic_value": "MEDIUM - detect reductions"
+      },
+      {
+        "field": "award_notice_date",
+        "type": "ISO 8601 timestamp",
+        "usage": "When award was notified",
+        "forensic_value": "MEDIUM - timeline reconstruction"
+      }
+    ],
+    "amendment_tracking": [
+      {
+        "field": "core_project_num",
+        "type": "string",
+        "usage": "Links all versions of same grant",
+        "forensic_value": "CRITICAL - track renewals/amendments"
+      },
+      {
+        "field": "project_num_split.support_year",
+        "type": "string",
+        "usage": "Year within grant cycle",
+        "forensic_value": "HIGH - identify which year terminated"
+      },
+      {
+        "field": "fiscal_year",
+        "type": "integer",
+        "usage": "Fiscal year of award",
+        "forensic_value": "MEDIUM - temporal analysis"
+      }
+    ]
+  },
+  "example_search_payloads": {
+    "find_recently_terminated": {
+      "description": "Projects that became inactive in past 30 days",
+      "payload": {
+        "criteria": {
+          "include_active_projects": false,
+          "date_added": {
+            "from_date": "2026-02-10"
+          }
+        },
+        "limit": 500
+      }
+    },
+    "find_by_grant_number": {
+      "description": "All versions of a specific grant",
+      "payload": {
+        "criteria": {
+          "project_nums": ["5R01AI178795*"]
+        }
+      }
+    },
+    "find_by_institution": {
+      "description": "All inactive grants from specific universities",
+      "payload": {
+        "criteria": {
+          "org_names": ["HARVARD UNIVERSITY", "MIT"],
+          "include_active_projects": false
+        }
+      }
+    },
+    "find_by_agency": {
+      "description": "Funding changes by specific NIH IC",
+      "payload": {
+        "criteria": {
+          "agencies": ["NIAID"],
+          "include_active_projects": false,
+          "project_end_date": {
+            "from_date": "2024-01-01"
+          }
+        }
+      }
+    },
+    "track_budget_changes": {
+      "description": "Large grants that became inactive",
+      "payload": {
+        "criteria": {
+          "include_active_projects": false,
+          "award_amount_range": {
+            "min_amount": 5000000
+          },
+          "project_end_date": {
+            "from_date": "2024-01-01"
+          }
+        }
+      }
+    }
+  }
+}
