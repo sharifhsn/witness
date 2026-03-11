@@ -77,7 +77,8 @@ scrape_nih <- function(from_date = "2025-01-01", to_date = NULL, max_records = 1
     }
   }
 
-  out <- dplyr::bind_rows(purrr::compact(results))
+  out <- dplyr::bind_rows(purrr::compact(results)) |>
+    dplyr::distinct(grant_number, .keep_all = TRUE)  # pagination overlap dedup
   if (nrow(out) > max_records) out <- dplyr::slice_head(out, n = max_records)
   out
 }

@@ -952,3 +952,12 @@ test_that("no R files use req_body_raw with jsonlite::toJSON", {
     )
   }
 })
+
+test_that("NIH scraper deduplicates by grant_number", {
+  # scrape_nih must call distinct(grant_number) to handle pagination overlap
+  lines <- readLines(file.path(.root, "R/scrape_nih.R"))
+  expect_true(
+    any(grepl("distinct.*grant_number", lines)),
+    info = "scrape_nih.R must deduplicate by grant_number (pagination overlap bug)"
+  )
+})

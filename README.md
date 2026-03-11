@@ -48,13 +48,13 @@ The pipeline discovers grants where **government reporting contradicts observed 
 
 | Metric | Value |
 |---|---|
-| NIH terminated grants scraped | 10,000 |
+| NIH terminated grants scraped | 8,641 (deduplicated) |
 | NSF terminated awards parsed | 1,667 |
 | USAspending awards fetched | 15,000 (HHS + NSF + EPA) |
 | Exact matches (grant number) | 489 |
-| Fuzzy matches (org name + date) | 13,351 |
-| Active Despite Terminated | 2,108 grants |
-| Possible Freeze (< 10% outlay) | 14,373 grants |
+| Fuzzy matches (org name + date) | 11,886 |
+| Active Despite Terminated | 1,838 grants |
+| Possible Freeze (< 10% outlay) | 13,178 grants |
 | Untracked (no forensic notice) | 11,310 grants |
 
 ## Running the Pipeline
@@ -108,7 +108,7 @@ R/
   visualize.R           # ggplot2 charts (GW visual style)
   utils.R               # Shared HTTP, date parsing, logging
 tests/
-  testthat/test-parsers.R   # 151 tests covering all modules
+  testthat/test-parsers.R   # 152 tests covering all modules
 _targets.R                  # Pipeline orchestration
 ```
 
