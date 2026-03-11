@@ -1,0 +1,123 @@
+---
+title: "Grant Witness PoC"
+subtitle: "Federal Grant Discrepancy Analysis"
+format:
+  dashboard:
+    theme: flatly
+    nav-buttons:
+      - icon: github
+        href: https://github.com/sharifhsn/witness
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(targets)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(scales)
+
+# Load pipeline outputs
+discrepancies <- tar_read(discrepancies)
+summary_df    <- tar_read(discrepancy_summary)
+
+# Source viz functions
+source("R/visualize.R")
+source("R/utils.R")
+```
+
+# Overview
+
+## Row {height=25%}
+
+```{r}
+#| content: valuebox
+#| title: "Total Grants Analyzed"
+list(
+  value = format(nrow(discrepancies), big.mark = ","),
+  icon  = "database",
+  color = "#570da0"
+)
+```
+
+```{r}
+#| content: valuebox
+#| title: "Discrepancies Found"
+n_disc <- sum(discrepancies$discrepancy_type != "normal", na.rm = TRUE)
+list(
+  value = format(n_disc, big.mark = ","),
+  icon  = "exclamation-triangle",
+  color = "#e38958"
+)
+```
+
+```{r}
+#| content: valuebox
+#| title: "Dollar Exposure"
+total <- sum(
+  discrepancies$award_amount[discrepancies$discrepancy_type != "normal"],
+  na.rm = TRUE
+)
+list(
+  value = paste0("$", format(round(total / 1e6), big.mark = ","), "M"),
+  icon  = "currency-dollar",
+  color = "#a4388a"
+)
+```
+
+## Row {height=75%}
+
+### Column {width=50%}
+
+```{r}
+#| title: "Discrepancies by Agency"
+ggplotly(plot_discrepancy_summary(summary_df), tooltip = c("x", "fill"))
+```
+
+### Column {width=50%}
+
+```{r}
+#| title: "NIH Institutes — Terminated Grant Count"
+ggplotly(plot_institute_bars(discrepancies), tooltip = c("x", "y", "fill"))
+```
+
+# Analysis
+
+## Row {height=50%}
+
+```{r}
+#| title: "Award Amount vs. Outlay Ratio"
+ggplotly(plot_outlay_scatter(discrepancies), tooltip = c("x", "y", "color"))
+```
+
+## Row {height=50%}
+
+```{r}
+#| title: "Geographic Distribution"
+plot_state_map(discrepancies)
+```
+
+# Data
+
+```{r}
+#| title: "Discrepancy Records"
+discrepancies |>
+  filter(discrepancy_type != "normal") |>
+  select(
+    Agency = agency_name,
+    Grant  = grant_number,
+    Org    = org_name,
+    Amount = award_amount,
+    Outlays = total_outlays,
+    Type    = discrepancy_type
+  ) |>
+  mutate(
+    Amount  = label_dollar()(Amount),
+    Outlays = label_dollar()(Outlays)
+  ) |>
+  DT::datatable(
+    options = list(pageLength = 20, scrollX = TRUE),
+    filter  = "top"
+  )
+```

@@ -1,0 +1,62 @@
+name: Run targets pipeline
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly on Monday at 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  targets:
+    runs-on: ubuntu-latest
+
+    env:
+      RENV_PATHS_ROOT: ~/.local/share/renv
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+
+      - name: Cache R packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.RENV_PATHS_ROOT }}
+          key: ${{ runner.os }}-renv-${{ hashFiles('renv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-renv-
+
+      # Requires renv.lock — run renv::init() locally first, then commit
+      - name: Restore renv environment
+        run: |
+          install.packages("renv")
+          renv::restore()
+        shell: Rscript {0}
+
+      # Restore cached targets from previous runs to avoid re-scraping
+      - name: Restore targets cache
+        uses: actions/cache@v4
+        with:
+          path: _targets/
+          key: ${{ runner.os }}-targets-${{ hashFiles('R/*.R') }}
+          restore-keys: |
+            ${{ runner.os }}-targets-
+
+      - name: Run targets pipeline
+        run: |
+          targets::tar_make()
+        shell: Rscript {0}
+
+      - name: Upload output artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-output
+          path: output/
+          if-no-files-found: ignore
