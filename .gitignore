@@ -1,0 +1,27 @@
+# R environment
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+renv/library/
+renv/staging/
+renv/sandbox/
+
+# targets pipeline
+_targets/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.Renviron
+
+# Data artifacts (keep PNGs for README)
+*.parquet
+*.csv
+
+# Quarto render artifacts
+_site/
+.quarto/
