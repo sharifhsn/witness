@@ -16,8 +16,10 @@
 FREEZE_RATIO_THRESHOLD <- 0.10
 
 # Maximum string-distance (Jaro-Winkler) allowed when fuzzy-matching org names.
-# Lower = stricter; 0.15 tolerates common abbreviation differences.
-FUZZY_ORG_DISTANCE <- 0.15
+# Tightened from 0.15 to 0.08 after audit showed 71% false positive rate at 0.10-0.15
+# (e.g. "UNIVERSITY OF CHICAGO" matching "UNIVERSITY OF UTAH"). At 0.08, matches like
+# abbreviation differences and minor typos still pass, but shared-prefix false positives don't.
+FUZZY_ORG_DISTANCE <- 0.08
 
 # Date proximity window for the fuzzy fallback join. Two records are considered
 # temporally compatible when their action dates fall within this many days.
@@ -75,9 +77,37 @@ join_and_flag <- function(notices, awards) {
     dplyr::mutate(match_method = "unmatched_award")
 
   # --- Combine all strata and compute flags --------------------------------
-  combined <- dplyr::bind_rows(exact_result, fuzzy_result, orphan_awards) |>
+  combined_raw <- dplyr::bind_rows(exact_result, fuzzy_result, orphan_awards)
+
+  # Ensure award_amount_notice exists even when no exact/fuzzy matches occurred
+  # (bind_rows only creates the column when at least one stratum has it)
+  if (!"award_amount_notice" %in% names(combined_raw)) {
+    combined_raw$award_amount_notice <- NA_real_
+  }
+
+  combined <- combined_raw |>
     dplyr::mutate(
       outlay_ratio = .safe_ratio(total_outlays, award_amount),
+
+      # Fraction of award period elapsed as of today, clamped to [0, 1].
+      # NA when dates are missing or inverted. Used to prioritise possible_freeze:
+      # a grant at 0.90 elapsed with 5% outlay is far more alarming than one at 0.02.
+      elapsed_ratio = dplyr::if_else(
+        !is.na(action_date) & !is.na(end_date) & end_date > action_date,
+        pmin(pmax(as.numeric(Sys.Date() - action_date) /
+                    as.numeric(end_date - action_date), 0), 1),
+        NA_real_
+      ),
+
+      # Amount discrepancy between forensic notice and official USAspending record.
+      # Only meaningful for exact matches (same grant_number in both sources).
+      # For fuzzy matches, amounts are expected to differ as they come from different grants.
+      # A >25% gap in an exact match may indicate: different performance periods,
+      # mid-project modifications, or data entry errors in one source.
+      flag_amount_mismatch = match_method == "exact" &
+        !is.na(award_amount_notice) & !is.na(award_amount) &
+        award_amount > 0 &
+        abs(award_amount_notice / award_amount - 1) > 0.25,
 
       flag_active_despite_terminated = .flag_active_despite_terminated(
         terminated = !is.na(notice_date),
@@ -101,6 +131,14 @@ join_and_flag <- function(notices, awards) {
       -dplyr::any_of(c("notice_row_id", "award_row_id"))
     ) |>
     dplyr::arrange(discrepancy_type, dplyr::desc(award_amount))
+
+  n_amount_mismatch <- sum(combined$flag_amount_mismatch, na.rm = TRUE)
+  if (n_amount_mismatch > 0) {
+    log_event(sprintf(
+      "join_and_flag: %d matched grants have >25%% amount discrepancy between sources",
+      n_amount_mismatch
+    ), "WARN")
+  }
 
   log_event(sprintf(
     "join_and_flag complete: %d rows, discrepancy breakdown: %s",
@@ -290,6 +328,10 @@ summarize_discrepancies <- function(joined_df) {
     # fuzzyjoin creates org_name.x (notice) and org_name.y (award) for the join key.
     # Canonicalize to award-side org_name.
     dplyr::rename(org_name_notice = org_name.x, org_name = org_name.y) |>
+    # Token overlap filter: require at least one shared distinctive word.
+    # Prevents "UNIVERSITY OF X" matching "UNIVERSITY OF Y" when JW is fooled
+    # by long shared prefixes.
+    dplyr::filter(.share_distinctive_token(org_name_notice, org_name)) |>
     # Secondary filter: action_date on the award must be within the window of
     # the notice_date, ensuring we're comparing contemporaneous records.
     dplyr::filter(
@@ -324,6 +366,27 @@ summarize_discrepancies <- function(joined_df) {
     notice_row_id  = integer(0),
     award_row_id   = integer(0)
   )
+}
+
+# Stopwords that don't differentiate org names — shared by most universities,
+# hospitals, and research institutions. Used by .share_distinctive_token().
+.ORG_STOPWORDS <- c(
+  "UNIVERSITY", "OF", "THE", "COLLEGE", "INSTITUTE", "SCHOOL", "CENTER",
+  "MEDICAL", "RESEARCH", "HEALTH", "STATE", "NATIONAL", "DEPARTMENT",
+  "FOUNDATION", "HOSPITAL", "SCIENCES", "SCIENCE", "COMMUNITY", "SYSTEM",
+  "AND", "FOR", "AT", "IN"
+)
+
+# Vectorised check: do two org name vectors share at least one distinctive token?
+# Returns TRUE when any word that appears in both names is NOT a stopword.
+# This catches false positives like "UNIVERSITY OF CHICAGO" ~ "UNIVERSITY OF UTAH"
+# where JW distance is low due to shared prefix but no distinctive word overlaps.
+.share_distinctive_token <- function(a, b) {
+  vapply(seq_along(a), function(i) {
+    tokens_a <- setdiff(strsplit(a[i], "\\s+")[[1]], .ORG_STOPWORDS)
+    tokens_b <- setdiff(strsplit(b[i], "\\s+")[[1]], .ORG_STOPWORDS)
+    length(intersect(tokens_a, tokens_b)) > 0
+  }, logical(1))
 }
 
 # Vectorised ratio with protection against division by zero and NA inputs.

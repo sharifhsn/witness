@@ -206,6 +206,66 @@ plot_state_map <- function(notices) {
 }
 
 # ---------------------------------------------------------------------------
+# Plot 5: Freeze severity — elapsed_ratio vs outlay_ratio for possible_freeze
+# ---------------------------------------------------------------------------
+
+#' Freeze severity scatter: how far through the award period vs how much was spent
+#'
+#' Each point is a "possible_freeze" grant. The most alarming grants are in the
+#' top-right (nearly expired period, near-zero outlays). Sized by award amount.
+#'
+#' @param discrepancies Tibble from join_and_flag().
+#' @return A ggplot object.
+#' @export
+plot_freeze_severity <- function(discrepancies) {
+  plot_data <- discrepancies |>
+    dplyr::filter(
+      discrepancy_type == "possible_freeze",
+      !is.na(elapsed_ratio),
+      !is.na(outlay_ratio),
+      !is.na(award_amount)
+    ) |>
+    dplyr::mutate(
+      # Highlight the most alarming quadrant: >50% elapsed, <10% outlaid
+      severity = dplyr::if_else(
+        elapsed_ratio > 0.5 & outlay_ratio < FREEZE_RATIO_THRESHOLD,
+        "High Urgency", "Lower Urgency"
+      )
+    )
+
+  ggplot2::ggplot(
+    plot_data,
+    ggplot2::aes(x = elapsed_ratio, y = outlay_ratio,
+                 size = award_amount, color = severity)
+  ) +
+    ggplot2::geom_point(alpha = 0.5) +
+    ggplot2::scale_color_manual(
+      values = c("High Urgency" = "#e38958", "Lower Urgency" = "#a4388a"),
+      name = "Freeze Urgency"
+    ) +
+    ggplot2::scale_size_continuous(
+      labels = scales::label_dollar(scale_cut = scales::cut_short_scale()),
+      name = "Award Amount", range = c(1, 6)
+    ) +
+    ggplot2::scale_x_continuous(labels = scales::label_percent(), limits = c(0, 1)) +
+    ggplot2::scale_y_continuous(labels = scales::label_percent(), limits = c(0, 1)) +
+    ggplot2::geom_vline(xintercept = 0.5, linetype = "dashed", color = "grey60", linewidth = 0.4) +
+    ggplot2::geom_hline(yintercept = FREEZE_RATIO_THRESHOLD,
+                        linetype = "dashed", color = "grey60", linewidth = 0.4) +
+    ggplot2::annotate("text", x = 0.75, y = 0.03,
+                      label = "High urgency:\n>50% elapsed,\n<10% outlaid",
+                      size = 3, color = "#e38958", hjust = 0.5) +
+    ggplot2::labs(
+      title    = "Freeze Severity: Award Period Elapsed vs. Disbursement",
+      subtitle = "Possible-freeze grants — upper-right quadrant is most alarming",
+      x = "Fraction of Award Period Elapsed",
+      y = "Outlay Ratio (Disbursed / Obligated)",
+      caption  = "Source: USAspending.gov | Grant Witness PoC"
+    ) +
+    theme_gw()
+}
+
+# ---------------------------------------------------------------------------
 # Save helper — called by targets
 # ---------------------------------------------------------------------------
 
@@ -224,7 +284,8 @@ save_plots <- function(notices, discrepancies, summary_df, out_dir = "output") {
     institute_bars     = plot_institute_bars(notices),
     discrepancy_summary = plot_discrepancy_summary(summary_df),
     outlay_scatter     = plot_outlay_scatter(discrepancies),
-    state_map          = plot_state_map(notices)
+    state_map          = plot_state_map(notices),
+    freeze_severity    = plot_freeze_severity(discrepancies)
   )
 
   paths <- character(length(plots))

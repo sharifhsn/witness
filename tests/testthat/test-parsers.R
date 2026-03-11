@@ -1043,3 +1043,334 @@ test_that("validate_awards flags negative and over-disbursed outlays", {
   expect_true(result$flag_over_disbursed[2])   # 1000 > 500 * 1.5
   expect_false(result$flag_over_disbursed[3])  # 100 < 200 * 1.5
 })
+
+test_that("validate_awards flags inverted dates", {
+  df <- dplyr::tibble(
+    agency_name   = c("HHS", "NSF"),
+    award_amount  = c(1000, 500),
+    total_outlays = c(500, 200),
+    action_date   = as.Date(c("2025-06-01", "2025-01-01")),
+    end_date      = as.Date(c("2024-01-01", "2026-01-01")),  # first is inverted
+    grant_number  = c("A", "B")
+  )
+  result <- suppressMessages(validate_awards(df))
+  expect_true(result$flag_date_inverted[1])
+  expect_false(result$flag_date_inverted[2])
+})
+
+test_that("distinctive token filter rejects shared-prefix false positives", {
+  source(file.path(.root, "R/transform.R"))
+  # Same distinctive token = TRUE
+  expect_true(.share_distinctive_token("UNIVERSITY OF CHICAGO", "UNIVERSITY OF CHICAGO"))
+  expect_true(.share_distinctive_token("HARVARD UNIVERSITY", "HARVARD"))
+  expect_true(.share_distinctive_token("STANFORD UNIVERSITY", "STANFORD RESEARCH"))
+  # No shared distinctive token = FALSE (these are false positives)
+  expect_false(.share_distinctive_token("UNIVERSITY OF CHICAGO", "UNIVERSITY OF UTAH"))
+  expect_false(.share_distinctive_token("UNIVERSITY OF MIAMI", "UNIVERSITY OF WYOMING"))
+  expect_false(.share_distinctive_token("UNIVERSITY OF IOWA", "UNIVERSITY OF ILLINOIS"))
+})
+
+test_that("fuzzy join distance threshold is strict enough", {
+  # After audit: 0.15 caused 71% false positive rate, tightened to 0.08
+  source(file.path(.root, "R/transform.R"))
+  expect_true(FUZZY_ORG_DISTANCE <= 0.10)
+})
+
+# ---------------------------------------------------------------------------
+# elapsed_ratio — grant lifecycle context
+# ---------------------------------------------------------------------------
+
+test_that("integration: elapsed_ratio is in join_and_flag output", {
+  notices <- validate_notices(.terminated_notice("ER-001", "Elapsed Corp"))
+  awards  <- validate_awards(.award_row("ER-001", "Elapsed Corp",
+    action_date = Sys.Date() - 365L, end_date = Sys.Date() + 365L))
+  result <- join_and_flag(notices, awards)
+  expect_true("elapsed_ratio" %in% names(result))
+})
+
+test_that("integration: elapsed_ratio is between 0 and 1 for active awards", {
+  notices <- validate_notices(.terminated_notice("ER-002", "Midlife Corp"))
+  awards  <- validate_awards(.award_row("ER-002", "Midlife Corp",
+    action_date = Sys.Date() - 180L,
+    end_date    = Sys.Date() + 180L))  # 50% through
+  result <- join_and_flag(notices, awards)
+  matched <- dplyr::filter(result, grant_number == "ER-002")
+  expect_gte(matched$elapsed_ratio, 0.45)
+  expect_lte(matched$elapsed_ratio, 0.55)
+})
+
+test_that("integration: elapsed_ratio is NA when dates are missing", {
+  notices <- validate_notices(.terminated_notice("ER-003", "No Date Corp"))
+  awards  <- validate_awards(dplyr::tibble(
+    agency_name   = "NSF",
+    award_amount  = 100000,
+    action_date   = as.Date(NA),
+    end_date      = as.Date(NA),
+    grant_number  = "ER-003",
+    org_name      = "No Date Corp",
+    total_outlays = 0
+  ))
+  result <- join_and_flag(notices, awards)
+  matched <- dplyr::filter(result, grant_number == "ER-003")
+  expect_true(is.na(matched$elapsed_ratio))
+})
+
+test_that("integration: elapsed_ratio capped at 1.0 for expired awards", {
+  notices <- validate_notices(.terminated_notice("ER-004", "Expired Corp"))
+  awards  <- validate_awards(.award_row("ER-004", "Expired Corp",
+    action_date = Sys.Date() - 730L,   # 2 years ago
+    end_date    = Sys.Date() - 365L))  # ended 1 year ago
+  result <- join_and_flag(notices, awards)
+  matched <- dplyr::filter(result, grant_number == "ER-004")
+  expect_equal(matched$elapsed_ratio, 1.0)
+})
+
+test_that("integration: elapsed_ratio floored at 0.0 for future-start awards", {
+  notices <- validate_notices(.terminated_notice("ER-005", "Future Corp"))
+  awards  <- validate_awards(.award_row("ER-005", "Future Corp",
+    action_date = Sys.Date() + 30L,   # starts in the future
+    end_date    = Sys.Date() + 395L))
+  result <- join_and_flag(notices, awards)
+  matched <- dplyr::filter(result, grant_number == "ER-005")
+  expect_equal(matched$elapsed_ratio, 0.0)
+})
+
+# ---------------------------------------------------------------------------
+# flag_amount_mismatch — notice vs official award amount concordance
+# ---------------------------------------------------------------------------
+
+test_that("integration: flag_amount_mismatch is in join_and_flag output", {
+  notices <- validate_notices(.terminated_notice("AM-001", "Amount Corp"))
+  awards  <- validate_awards(.award_row("AM-001", "Amount Corp"))
+  result <- join_and_flag(notices, awards)
+  expect_true("flag_amount_mismatch" %in% names(result))
+})
+
+test_that("integration: flag_amount_mismatch TRUE when exact-match amounts differ >25%", {
+  # Both sides have grant_number "AM-002" so it will be an exact match.
+  # notice says $1M, USAspending says $300K — >25% discrepancy.
+  notices <- validate_notices(dplyr::tibble(
+    agency_name      = "NSF",
+    notice_date      = as.Date("2025-02-01"),
+    source_url       = "https://nsf.gov/award/AM-002",
+    raw_text_snippet = "Test",
+    grant_number     = "AM-002",
+    org_name         = "Mismatch Corp",
+    award_amount     = 1000000
+  ))
+  awards <- validate_awards(.award_row("AM-002", "Mismatch Corp", award_amount = 300000))
+  result <- join_and_flag(notices, awards)
+  matched <- dplyr::filter(result, grant_number == "AM-002")
+  expect_equal(matched$match_method, "exact")
+  expect_true(matched$flag_amount_mismatch)
+})
+
+test_that("integration: flag_amount_mismatch FALSE when exact-match amounts agree within 25%", {
+  notices <- validate_notices(dplyr::tibble(
+    agency_name      = "NSF",
+    notice_date      = as.Date("2025-02-01"),
+    source_url       = "https://nsf.gov/award/AM-003",
+    raw_text_snippet = "Test",
+    grant_number     = "AM-003",
+    org_name         = "Close Corp",
+    award_amount     = 500000
+  ))
+  awards <- validate_awards(.award_row("AM-003", "Close Corp", award_amount = 510000))
+  result <- join_and_flag(notices, awards)
+  matched <- dplyr::filter(result, grant_number == "AM-003")
+  expect_equal(matched$match_method, "exact")
+  expect_false(matched$flag_amount_mismatch)
+})
+
+test_that("integration: flag_amount_mismatch FALSE for fuzzy matches (cross-grant comparison invalid)", {
+  # Different grant numbers, same org. Will fuzzy-match. Amount comparison meaningless.
+  notices <- validate_notices(dplyr::tibble(
+    agency_name      = "NSF",
+    notice_date      = as.Date("2025-02-01"),
+    source_url       = "https://nsf.gov/award/AM-NOTICE",
+    raw_text_snippet = "Test",
+    grant_number     = NA_character_,  # no grant_number forces fuzzy path
+    org_name         = "Stanford University",
+    award_amount     = 5000000  # very different from award
+  ))
+  awards <- validate_awards(dplyr::tibble(
+    agency_name   = "NSF",
+    award_amount  = 100000,
+    action_date   = as.Date("2025-01-15"),
+    grant_number  = NA_character_,
+    org_name      = "Stanford University",
+    total_outlays = 0,
+    end_date      = Sys.Date() + 365L
+  ))
+  result <- join_and_flag(notices, awards)
+  # If a fuzzy match occurs, the flag should still be FALSE for it
+  fuzzy_rows <- dplyr::filter(result, match_method == "fuzzy")
+  expect_true(all(!fuzzy_rows$flag_amount_mismatch))
+})
+
+test_that("integration: flag_amount_mismatch FALSE for unmatched awards (no notice amount)", {
+  notices <- validate_notices(.terminated_notice("AM-NOTICE", "Notice Only Corp"))
+  awards  <- validate_awards(.award_row("AM-AWARD-ONLY", "Different Corp",
+    end_date = Sys.Date() - 30L))
+  result <- join_and_flag(notices, awards)
+  orphan <- dplyr::filter(result, grant_number == "AM-AWARD-ONLY")
+  expect_false(orphan$flag_amount_mismatch)
+})
+
+# ---------------------------------------------------------------------------
+# CFDA-agency cross-validation
+# ---------------------------------------------------------------------------
+
+test_that("CFDA-agency check catches mismatched prefix", {
+  source(file.path(.root, "R/validate.R"))
+  # 93.xxx should be HHS, not NSF
+  expect_true(.check_cfda_agency("93.395", "National Science Foundation"))
+  # 47.xxx should be NSF, not HHS
+  expect_true(.check_cfda_agency("47.041", "Department of Health and Human Services"))
+})
+
+test_that("CFDA-agency check passes when prefix matches correctly", {
+  source(file.path(.root, "R/validate.R"))
+  expect_false(.check_cfda_agency("93.395", "Department of Health and Human Services"))
+  expect_false(.check_cfda_agency("47.041", "National Science Foundation"))
+  expect_false(.check_cfda_agency("66.001", "Environmental Protection Agency"))
+})
+
+test_that("CFDA-agency check returns FALSE for NA or unknown prefix", {
+  source(file.path(.root, "R/validate.R"))
+  expect_false(.check_cfda_agency(NA_character_, "NSF"))
+  expect_false(.check_cfda_agency("99.999", "Unknown Agency"))
+})
+
+# ---------------------------------------------------------------------------
+# Zero award, future date, duplicate detection
+# ---------------------------------------------------------------------------
+
+test_that("validate_awards flags zero-dollar awards", {
+  df <- dplyr::tibble(
+    agency_name   = c("HHS", "NSF"),
+    award_amount  = c(0, 500000),
+    total_outlays = c(0, 200000),
+    action_date   = rep(as.Date("2025-01-01"), 2),
+    end_date      = rep(as.Date("2026-01-01"), 2),
+    grant_number  = c("Z001", "Z002")
+  )
+  result <- suppressMessages(validate_awards(df))
+  expect_true("flag_zero_award" %in% names(result))
+  expect_true(result$flag_zero_award[1])
+  expect_false(result$flag_zero_award[2])
+})
+
+test_that("validate_awards flags future action dates", {
+  df <- dplyr::tibble(
+    agency_name   = c("HHS", "NSF"),
+    award_amount  = c(100000, 200000),
+    total_outlays = c(50000, 100000),
+    action_date   = as.Date(c("2099-01-01", "2025-01-01")),
+    end_date      = as.Date(c("2100-01-01", "2026-01-01")),
+    grant_number  = c("F001", "F002")
+  )
+  result <- suppressMessages(validate_awards(df))
+  expect_true("flag_future_date" %in% names(result))
+  expect_true(result$flag_future_date[1])
+  expect_false(result$flag_future_date[2])
+})
+
+test_that("validate_awards detects CFDA-agency mismatch via flag", {
+  df <- dplyr::tibble(
+    agency_name   = c("Department of Health and Human Services", "National Science Foundation"),
+    award_amount  = c(100000, 200000),
+    total_outlays = c(50000, 100000),
+    action_date   = rep(as.Date("2025-01-01"), 2),
+    end_date      = rep(as.Date("2026-01-01"), 2),
+    grant_number  = c("C001", "C002"),
+    cfda_number   = c("47.041", "47.041")  # NSF prefix on HHS award = mismatch
+  )
+  result <- suppressMessages(validate_awards(df))
+  expect_true(result$flag_cfda_mismatch[1])  # 47 prefix but HHS agency
+  expect_false(result$flag_cfda_mismatch[2]) # 47 prefix and NSF agency
+})
+
+# ---------------------------------------------------------------------------
+# State code validation in notices
+# ---------------------------------------------------------------------------
+
+test_that("validate_notices flags invalid state codes", {
+  df <- tibble::tibble(
+    agency_name      = c("NIH", "NIH", "NIH", "NIH"),
+    notice_date      = rep(as.Date("2025-01-01"), 4),
+    source_url       = rep("https://example.com", 4),
+    raw_text_snippet = rep("Test", 4),
+    org_state        = c("CA", "XX", "PR", "ON")  # CA valid, XX invalid, PR territory, ON Canadian
+  )
+  result <- suppressMessages(validate_notices(df))
+  expect_true("flag_invalid_state" %in% names(result))
+  expect_false(result$flag_invalid_state[1])  # CA is valid US state
+  expect_true(result$flag_invalid_state[2])   # XX is truly invalid
+  expect_false(result$flag_invalid_state[3])  # PR is valid territory
+  expect_false(result$flag_invalid_state[4])  # ON is Canadian (not invalid, just international)
+})
+
+test_that("validate_notices detects international grants via Canadian province codes", {
+  df <- tibble::tibble(
+    agency_name      = c("NIH", "NIH", "NIH"),
+    notice_date      = rep(as.Date("2025-01-01"), 3),
+    source_url       = rep("https://example.com", 3),
+    raw_text_snippet = rep("Test", 3),
+    org_state        = c("BC", "CA", "QC")
+  )
+  result <- suppressMessages(validate_notices(df))
+  expect_true("flag_international" %in% names(result))
+  expect_true(result$flag_international[1])   # BC = British Columbia
+  expect_false(result$flag_international[2])  # CA = California (not international)
+  expect_true(result$flag_international[3])   # QC = Quebec
+})
+
+test_that("validate_notices handles missing org_state column gracefully", {
+  df <- .valid_notices()  # no org_state column
+  result <- suppressMessages(validate_notices(df))
+  expect_true("flag_invalid_state" %in% names(result))
+  expect_false(result$flag_invalid_state[1])  # all FALSE when column absent
+})
+
+test_that("VALID_STATE_CODES includes all 50 states plus DC and territories", {
+  source(file.path(.root, "R/validate.R"))
+  expect_true("CA" %in% .VALID_STATE_CODES)
+  expect_true("NY" %in% .VALID_STATE_CODES)
+  expect_true("DC" %in% .VALID_STATE_CODES)
+  expect_true("PR" %in% .VALID_STATE_CODES)
+  expect_true("GU" %in% .VALID_STATE_CODES)
+  expect_length(.VALID_STATE_CODES, 56L)  # 50 states + DC + 5 territories
+})
+
+# ---------------------------------------------------------------------------
+# Grant number format validation
+# ---------------------------------------------------------------------------
+
+test_that("validate_notices flags malformed NSF grant numbers", {
+  df <- tibble::tibble(
+    agency_name      = c("NSF", "NSF", "NSF"),
+    notice_date      = rep(as.Date("2025-01-01"), 3),
+    source_url       = rep("https://example.com", 3),
+    raw_text_snippet = rep("Test", 3),
+    grant_number     = c("2301234", "ABC", "12345678")  # valid, invalid, too long
+  )
+  result <- suppressMessages(validate_notices(df))
+  expect_true("flag_bad_grant_number" %in% names(result))
+  expect_false(result$flag_bad_grant_number[1])  # 7 digits = valid NSF
+  expect_true(result$flag_bad_grant_number[2])   # letters = invalid NSF
+  expect_true(result$flag_bad_grant_number[3])   # 8 digits = invalid NSF
+})
+
+test_that("validate_notices accepts valid NIH grant number formats", {
+  df <- tibble::tibble(
+    agency_name      = c("NIH", "NIH"),
+    notice_date      = rep(as.Date("2025-01-01"), 2),
+    source_url       = rep("https://example.com", 2),
+    raw_text_snippet = rep("Test", 2),
+    grant_number     = c("1R01AI123456-01", "5F30EY033692-02")
+  )
+  result <- suppressMessages(validate_notices(df))
+  expect_false(result$flag_bad_grant_number[1])
+  expect_false(result$flag_bad_grant_number[2])
+})
