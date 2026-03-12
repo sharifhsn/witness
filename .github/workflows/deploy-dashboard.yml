@@ -1,0 +1,98 @@
+name: Deploy dashboard to GitHub Pages
+
+on:
+  # Runs after the pipeline workflow completes
+  workflow_run:
+    workflows: ["Run targets pipeline"]
+    types: [completed]
+    branches: [main]
+  # Also run on push if dashboard source changes
+  push:
+    branches: [main]
+    paths:
+      - dashboard.qmd
+      - _quarto.yml
+      - R/visualize.R
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Only deploy if pipeline succeeded (or if triggered directly)
+    if: >
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    env:
+      RENV_PATHS_ROOT: ~/.local/share/renv
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+
+      - name: Cache R packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.RENV_PATHS_ROOT }}
+          key: ${{ runner.os }}-renv-${{ hashFiles('renv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-renv-
+
+      - name: Restore renv environment
+        run: |
+          install.packages("renv")
+          renv::restore()
+        shell: Rscript {0}
+
+      - name: Restore targets cache
+        uses: actions/cache@v4
+        with:
+          path: _targets/
+          key: ${{ runner.os }}-targets-${{ hashFiles('R/*.R') }}
+          restore-keys: |
+            ${{ runner.os }}-targets-
+
+      - name: Run targets pipeline
+        run: |
+          targets::tar_make()
+        shell: Rscript {0}
+
+      - uses: quarto-dev/quarto-actions/setup@v2
+
+      - name: Render dashboard
+        run: quarto render dashboard.qmd
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

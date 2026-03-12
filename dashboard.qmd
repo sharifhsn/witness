@@ -1,12 +1,12 @@
 ---
 title: "Grant Witness PoC"
 subtitle: "Federal Grant Discrepancy Analysis"
+author: "Sharif Haason"
+date: last-modified
 format:
   dashboard:
     theme: flatly
-    nav-buttons:
-      - icon: github
-        href: https://github.com/sharifhsn/witness
+    orientation: rows
 ---
 
 ```{r}
@@ -19,12 +19,14 @@ library(plotly)
 library(scales)
 
 # Load pipeline outputs
+notices       <- tar_read(validated_notices)
 discrepancies <- tar_read(discrepancies)
 summary_df    <- tar_read(discrepancy_summary)
 
-# Source viz functions
-source("R/visualize.R")
+# Source all R modules (needed for FREEZE_RATIO_THRESHOLD and viz functions)
 source("R/utils.R")
+source("R/transform.R")
+source("R/visualize.R")
 ```
 
 # Overview
@@ -79,7 +81,7 @@ ggplotly(plot_discrepancy_summary(summary_df), tooltip = c("x", "fill"))
 
 ```{r}
 #| title: "NIH Institutes — Terminated Grant Count"
-ggplotly(plot_institute_bars(discrepancies), tooltip = c("x", "y", "fill"))
+ggplotly(plot_institute_bars(notices), tooltip = c("x", "y", "fill"))
 ```
 
 # Analysis
@@ -93,9 +95,18 @@ ggplotly(plot_outlay_scatter(discrepancies), tooltip = c("x", "y", "color"))
 
 ## Row {height=50%}
 
+### Column {width=50%}
+
 ```{r}
 #| title: "Geographic Distribution"
-plot_state_map(discrepancies)
+plot_state_map(notices)
+```
+
+### Column {width=50%}
+
+```{r}
+#| title: "Freeze Severity — Elapsed Period vs. Outlay"
+ggplotly(plot_freeze_severity(discrepancies), tooltip = c("x", "y", "size", "color"))
 ```
 
 # Data

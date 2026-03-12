@@ -86,6 +86,16 @@ The fuzzy join uses a two-layer approach to avoid false positives:
 1. **Jaro-Winkler threshold** tightened to 0.08 (from 0.15, which had 71% false positive rate)
 2. **Distinctive token filter** requires shared non-stopword tokens (blocks "University of X" matching "University of Y")
 
+## Dashboard
+
+**Live:** [sharifhsn.github.io/witness](https://sharifhsn.github.io/witness/)
+
+An interactive Quarto dashboard summarizes the pipeline results. To render locally:
+
+```bash
+quarto render dashboard.qmd && open dashboard.html
+```
+
 ## Running the Pipeline
 
 ```r

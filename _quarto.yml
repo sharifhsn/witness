@@ -1,0 +1,17 @@
+project:
+  type: website
+  output-dir: _site
+
+website:
+  title: "Grant Witness PoC"
+  site-url: "https://sharifhsn.github.io/witness/"
+  description: >
+    Cross-referencing NIH/NSF grant termination notices against USAspending.gov
+    to surface discrepancies in federal grant reporting.
+  open-graph: true
+  twitter-card:
+    card-style: summary_large_image
+  navbar:
+    right:
+      - icon: github
+        href: https://github.com/sharifhsn/witness
