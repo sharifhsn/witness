@@ -25,3 +25,5 @@ Thumbs.db
 # Quarto render artifacts
 _site/
 .quarto/
+dashboard.html
+dashboard_files/
