@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      RENV_PATHS_ROOT: ~/.local/share/renv
+      RENV_PATHS_ROOT: ~/.cache/R/renv
 
     steps:
       - uses: actions/checkout@v4
@@ -22,36 +22,30 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev \
+            libglpk-dev libgeos-dev libproj-dev
 
-      - name: Cache R packages
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.RENV_PATHS_ROOT }}
-          key: ${{ runner.os }}-renv-${{ hashFiles('renv.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-renv-
+      - uses: r-lib/actions/setup-renv@v2
 
-      # Requires renv.lock — run renv::init() locally first, then commit
-      - name: Restore renv environment
-        run: |
-          install.packages("renv")
-          renv::restore()
-        shell: Rscript {0}
-
-      # Restore cached targets from previous runs to avoid re-scraping
       - name: Restore targets cache
         uses: actions/cache@v4
         with:
           path: _targets/
-          key: ${{ runner.os }}-targets-${{ hashFiles('R/*.R') }}
+          key: targets-${{ hashFiles('_targets.R', 'R/*.R') }}-${{ github.run_id }}
           restore-keys: |
-            ${{ runner.os }}-targets-
+            targets-${{ hashFiles('_targets.R', 'R/*.R') }}-
+            targets-
 
       - name: Run targets pipeline
-        run: |
-          targets::tar_make()
+        run: targets::tar_make()
         shell: Rscript {0}
+
+      - name: Upload targets store
+        uses: actions/upload-artifact@v4
+        with:
+          name: targets-store
+          path: _targets/
+          retention-days: 7
 
       - name: Upload output artifacts
         if: always()

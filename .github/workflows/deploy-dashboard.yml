@@ -1,12 +1,10 @@
 name: Deploy dashboard to GitHub Pages
 
 on:
-  # Runs after the pipeline workflow completes
   workflow_run:
     workflows: ["Run targets pipeline"]
     types: [completed]
     branches: [main]
-  # Also run on push if dashboard source changes
   push:
     branches: [main]
     paths:
@@ -19,6 +17,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: read
 
 concurrency:
   group: pages
@@ -27,16 +26,37 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Only deploy if pipeline succeeded (or if triggered directly)
     if: >
       github.event_name != 'workflow_run' ||
       github.event.workflow_run.conclusion == 'success'
 
     env:
-      RENV_PATHS_ROOT: ~/.local/share/renv
+      RENV_PATHS_ROOT: ~/.cache/R/renv
 
     steps:
       - uses: actions/checkout@v4
+
+      # When triggered by pipeline completion, download its targets store
+      # instead of re-running the entire pipeline
+      - name: Download targets store from pipeline
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: targets-store
+          path: _targets/
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # When triggered directly (push/dispatch), restore from cache and run pipeline
+      - name: Restore targets cache
+        if: github.event_name != 'workflow_run'
+        uses: actions/cache@v4
+        with:
+          path: _targets/
+          key: targets-${{ hashFiles('_targets.R', 'R/*.R') }}-${{ github.run_id }}
+          restore-keys: |
+            targets-${{ hashFiles('_targets.R', 'R/*.R') }}-
+            targets-
 
       - uses: r-lib/actions/setup-r@v2
         with:
@@ -45,33 +65,14 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev \
+            libglpk-dev libgeos-dev libproj-dev
 
-      - name: Cache R packages
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.RENV_PATHS_ROOT }}
-          key: ${{ runner.os }}-renv-${{ hashFiles('renv.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-renv-
-
-      - name: Restore renv environment
-        run: |
-          install.packages("renv")
-          renv::restore()
-        shell: Rscript {0}
-
-      - name: Restore targets cache
-        uses: actions/cache@v4
-        with:
-          path: _targets/
-          key: ${{ runner.os }}-targets-${{ hashFiles('R/*.R') }}
-          restore-keys: |
-            ${{ runner.os }}-targets-
+      - uses: r-lib/actions/setup-renv@v2
 
       - name: Run targets pipeline
-        run: |
-          targets::tar_make()
+        if: github.event_name != 'workflow_run'
+        run: targets::tar_make()
         shell: Rscript {0}
 
       - uses: quarto-dev/quarto-actions/setup@v2
