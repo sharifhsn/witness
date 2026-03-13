@@ -10,8 +10,10 @@ R data pipeline that cross-references federal grant termination data with USAspe
 notices_nih ──┐
                ├─ validated_notices ─┐
 notices_nsf ──┘                      │
-                                     ├─ discrepancies ─┬─ discrepancy_summary
-usaspending_awards ─ validated_awards ┘                 ├─ plot_files
+                                     ├─ discrepancies ─┬─ transaction_data
+usaspending_awards ─ validated_awards ┘                 ├─ discrepancies_enriched
+                                                        ├─ discrepancy_summary
+                                                        ├─ plot_files
                                                         └─ export_parquet
 ```
 
@@ -38,14 +40,15 @@ Run with: `targets::tar_make()`
 | validate.R | 163 | `validate_notices()`, `validate_awards()` — assertr schemas |
 | scrape_nih.R | 199 | NIH Reporter API v2 paginated scraper |
 | scrape_nsf.R | 205 | NSF Terminated Awards CSV parser |
-| fetch_usaspending.R | 242 | USAspending.gov award fetcher |
-| transform.R | 418 | Exact/fuzzy join, discrepancy flags, `elapsed_ratio` |
+| fetch_usaspending.R | 420 | USAspending.gov award + transaction fetcher |
+| transform.R | 500 | Exact/fuzzy join, discrepancy flags, freeze enrichment |
 | visualize.R | 303 | 5 ggplot2 charts (GW visual style) |
 
 ## Critical API Constraints
 
 - **NIH Reporter**: Hard offset cap at 14,999. Use `req_body_json()` not `req_body_raw(toJSON(...))` (fails in callr).
-- **USAspending**: Hard page cap at 100. Date fields are `"Start Date"` / `"End Date"` (NOT "Period of Performance...").
+- **USAspending Awards**: Hard page cap at 100. Date fields are `"Start Date"` / `"End Date"` (NOT "Period of Performance...").
+- **USAspending Transactions**: `/api/v2/search/spending_by_transaction/` — page cap 100, same rate limits. Filter by `award_ids` list.
 - **NSF CSV**: Latin-1 encoding — must `iconv()` before parsing.
 
 ## Known Bug Classes (all have regression tests)
@@ -78,10 +81,10 @@ NSF exact matching works because NSF uses same 7-digit award ID in both systems.
 **HIGH**
 - Cross-agency institution analysis (`group_by(org_name)` across NIH + NSF)
 - Add DOE/USDA/ED to `fetch_usaspending.R` (trivial parameter change)
-- Transaction-level scraper (`/api/v2/transactions/`) — needed for Plan A freeze heuristic
 
 **MEDIUM**
-- PostgreSQL export (DBI + RPostgres already scoped)
+- PostgreSQL export (DBI + RPostgres — interface designed, just needs `DATABASE_URL`)
+- Airtable export (PATCH upsert in 10-record batches — interface designed)
 - Discrepancy UI (Shiny/Quarto surfacing `flag_amount_mismatch`)
 
 ## Output

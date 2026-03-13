@@ -1,24 +1,49 @@
 # Grant Witness PoC
 
-A reproducible R data pipeline that cross-references federal grant termination data with official USAspending.gov records to surface discrepancies in government reporting.
+**693 federal grants show active spending despite termination notices.**
 
-Built as a proof-of-concept extension of [Grant Witness](https://grant-witness.us/), demonstrating novel data analysis capabilities beyond the existing platform.
+This pipeline cross-references NIH and NSF grant termination data against official USAspending.gov records to find grants where government reporting contradicts observed termination activity. Built as a proof-of-concept extension of [Grant Witness](https://grant-witness.us/).
 
-## What This Does
+**[Live Dashboard](https://sharifhsn.github.io/witness/)**
+
+## What This Discovers
+
+| Discrepancy | What It Means | Count |
+|---|---|---|
+| **Active Despite Terminated** | USAspending shows live outlays on a grant that termination notices say is dead | 693 |
+| **Possible Freeze** | Award period is open but disbursements are absent or near-zero (<10% outlay ratio) | 4,957 |
+| **Untracked** | Official awards from tracked agencies with no corresponding forensic notice | 11,310 |
+
+The `possible_freeze` category is further triaged by **elapsed time** and **transaction-level data**: 489 grants are >50% through their award period with <10% outlay, and 142 are >80% elapsed. Transaction-level analysis assigns freeze confidence (high/medium/low) based on the actual last disbursement date.
+
+## Methodology
 
 ```
 NIH Reporter API ──┐                                  ┌── Discrepancy Flags
-                    ├── Validate ──┐                   │   - active_despite_terminated
-NSF Terminated CSV ─┘              ├── Join & Flag ────┤   - possible_freeze
-                                   │                   │   - untracked
-USAspending.gov API ── Validate ───┘                   └── Visualizations + Parquet
+                    ├── Validate ──┐                   ├── Transaction-Level Freeze Analysis
+NSF Terminated CSV ─┘              ├── Join & Flag ────┤── Visualizations
+                                   │                   └── Parquet + DB Export
+USAspending.gov API ── Validate ───┘
 ```
 
-The pipeline discovers grants where **government reporting contradicts observed termination activity**:
+**Fuzzy join precision tuning** — NIH grant numbers don't match USAspending Award IDs, so matching requires organization name similarity. Initial Jaro-Winkler matching at threshold 0.15 produced a 71% false positive rate ("University of Chicago" matched "University of Utah"). Tightened to 0.08 and added a distinctive-token filter requiring shared non-stopword tokens. Result: 2,498 fuzzy matches with high precision.
 
-- **Active Despite Terminated** — USAspending shows live outlays on a grant that termination notices say is dead
-- **Possible Freeze** — Award period is open but disbursements are absent or near-zero (< 10% outlay ratio)
-- **Untracked** — Official awards from tracked agencies with no corresponding forensic notice (coverage gaps)
+**10 automated quality flags** catch data anomalies across both datasets: negative outlays (accounting adjustments), over-disbursement (>150% of award), inverted dates, zero awards, future dates, CFDA mismatches, international grants, invalid states, malformed grant numbers, and amount discrepancies between sources.
+
+**Transaction-level freeze confirmation** — For grants flagged as possible freezes, the pipeline fetches individual transaction records from USAspending to determine when the last actual disbursement occurred. Grants with >180 days since last transaction are classified as high-confidence freezes.
+
+## Key Results
+
+| Metric | Value |
+|---|---|
+| NIH terminated grants scraped | 9,063 (deduplicated) |
+| NSF terminated awards parsed | 1,667 |
+| USAspending awards fetched | 15,000 (HHS + NSF + EPA) |
+| Exact matches (grant number) | 489 |
+| Fuzzy matches (org name + date) | 2,498 |
+| Active Despite Terminated | 693 |
+| Possible Freeze (<10% outlay) | 4,957 |
+| Untracked (no forensic notice) | 11,310 |
 
 ## Novel Contributions
 
@@ -26,130 +51,96 @@ The pipeline discovers grants where **government reporting contradicts observed 
 |---|---|---|
 | NIH institute-level breakdown | Agency-level only | Per-IC granularity (NIGMS, NIAID, etc.) |
 | Obligation vs. outlay analysis | Not available | Detects "frozen in practice" silent stoppages |
+| Transaction-level freeze detection | Not available | Confirms freeze with actual disbursement timeline |
 | Active-despite-terminated | Not available | Direct contradiction detection |
 | Cross-agency comparison | Separate pages | Unified join across NIH + NSF + EPA |
 | Geographic distribution | State-level maps | State-level choropleth from NIH Reporter |
 
 ## Visualizations
 
-### NIH Institutes by Terminated Grant Count
-![Institute Bar Chart](output/institute_bars.png)
+| | |
+|---|---|
+| ![Institute Bar Chart](output/institute_bars.png) | ![Discrepancy Summary](output/discrepancy_summary.png) |
+| ![Outlay Scatter](output/outlay_scatter.png) | ![Freeze Severity](output/freeze_severity.png) |
 
-### Federal Grant Discrepancies by Agency
-![Discrepancy Summary](output/discrepancy_summary.png)
-
-### Award Amount vs. Outlay Ratio
-![Outlay Scatter](output/outlay_scatter.png)
-
-### Freeze Severity: Elapsed Period vs. Disbursement
-![Freeze Severity](output/freeze_severity.png)
-
-### Geographic Distribution
 ![State Map](output/state_map.png)
 
-## Latest Results
+## Production Readiness
 
-| Metric | Value |
-|---|---|
-| NIH terminated grants scraped | 9,063 (deduplicated, active-filtered) |
-| NSF terminated awards parsed | 1,667 |
-| USAspending awards fetched | 15,000 (HHS + NSF + EPA) |
-| Exact matches (grant number) | 489 |
-| Fuzzy matches (org name + date) | 2,498 (precision-tuned, see below) |
-| Active Despite Terminated | 693 grants |
-| Possible Freeze (< 10% outlay) | 4,957 grants |
-| Untracked (no forensic notice) | 11,310 grants |
-
-### Data Quality Flags
-
-The pipeline applies 10 automated quality flags across both datasets:
-
-| Flag | Dataset | Description | Count |
-|---|---|---|---|
-| `flag_negative_outlay` | Awards | Negative outlays (accounting adjustments) | 16 |
-| `flag_over_disbursed` | Awards | Outlays > 150% of award amount | 1 |
-| `flag_date_inverted` | Awards | End date before start date | 8 |
-| `flag_zero_award` | Awards | $0 award amount | 0 |
-| `flag_future_date` | Awards | Action date in the future | 37 |
-| `flag_cfda_mismatch` | Awards | CFDA prefix doesn't match agency | 0 |
-| `flag_international` | Notices | Canadian province (cross-border grant) | 18 |
-| `flag_invalid_state` | Notices | Unrecognized state/territory code | 0 |
-| `flag_bad_grant_number` | Notices | Malformed grant number for agency | 0 |
-| `flag_amount_mismatch` | Joined | >25% gap between notice and USAspending amounts (exact matches only) | 24 |
-
-The discrepancies output also includes:
-- **`elapsed_ratio`** — Fraction of award period elapsed (0=just started, 1=expired). Enables triage within `possible_freeze`: 489 grants are >50% elapsed with <10% outlay; 142 are >80% elapsed.
-
-### Fuzzy Join Precision
-
-The fuzzy join uses a two-layer approach to avoid false positives:
-1. **Jaro-Winkler threshold** tightened to 0.08 (from 0.15, which had 71% false positive rate)
-2. **Distinctive token filter** requires shared non-stopword tokens (blocks "University of X" matching "University of Y")
-
-## Dashboard
-
-**Live:** [sharifhsn.github.io/witness](https://sharifhsn.github.io/witness/)
-
-An interactive Quarto dashboard summarizes the pipeline results. To render locally:
-
-```bash
-quarto render dashboard.qmd && open dashboard.html
-```
+- **Weekly automated runs** via GitHub Actions (Monday 06:00 UTC)
+- **PostgreSQL-ready** — set `DATABASE_URL` env var to enable export
+- **Airtable-compatible schema** — designed for integration with existing Grant Witness Airtable bases
+- **Reproducible** — `renv.lock` pins all R dependencies; `{targets}` caches intermediate results
 
 ## Running the Pipeline
 
 ```r
-# Install dependencies
-renv::restore()
-
-# Run the full pipeline
-targets::tar_make()
+renv::restore()        # Install dependencies
+targets::tar_make()    # Run the full pipeline
 ```
 
-The pipeline scrapes live data from:
-- [NIH Reporter API](https://api.reporter.nih.gov/) — terminated grant projects
-- [NSF Terminated Awards CSV](https://nsf-gov-resources.nsf.gov/files/NSF-Terminated-Awards.csv)
-- [USAspending.gov API](https://api.usaspending.gov/) — official award records for HHS, NSF, EPA
+<details>
+<summary>Technical Details</summary>
 
-Output lands in `output/`:
-- `discrepancies.parquet` — full joined dataset with discrepancy flags
-- `*.png` — visualization plots
-
-## Pipeline DAG
+### Pipeline DAG
 
 ```
 notices_nih ─────┐
                  ├─ validated_notices ─┐
 notices_nsf ─────┘                     │
-                                       ├─ discrepancies ─┬─ discrepancy_summary
-usaspending_awards ─ validated_awards ─┘                 ├─ plot_files
+                                       ├─ discrepancies ─┬─ transaction_data
+usaspending_awards ─ validated_awards ─┘                 ├─ discrepancies_enriched
+                                                         ├─ discrepancy_summary
+                                                         ├─ plot_files
                                                          └─ export_parquet
 ```
 
-## Tech Stack
+### Data Sources
+
+- [NIH Reporter API](https://api.reporter.nih.gov/) — terminated grant projects (offset cap: 14,999)
+- [NSF Terminated Awards CSV](https://nsf-gov-resources.nsf.gov/files/NSF-Terminated-Awards.csv) — Latin-1 encoded
+- [USAspending.gov API](https://api.usaspending.gov/) — award records (page cap: 100) and transaction search
+
+### Tech Stack
 
 - **R** with [{targets}](https://docs.ropensci.org/targets/) for reproducible pipeline orchestration
 - **httr2** for polite API access (rate limiting, retries, exponential backoff)
-- **fuzzyjoin** for Jaro-Winkler string-distance matching across datasets
+- **fuzzyjoin** for Jaro-Winkler string-distance matching
 - **assertr** for runtime data validation
 - **ggplot2** with viridis palette matching Grant Witness visual style
-- **GitHub Actions** for weekly automated runs
 
-## Project Structure
+### Project Structure
 
 ```
 R/
   scrape_nih.R          # NIH Reporter API scraper
   scrape_nsf.R          # NSF Terminated Awards CSV parser
-  fetch_usaspending.R   # USAspending.gov award fetcher
+  fetch_usaspending.R   # USAspending.gov award + transaction fetcher
   validate.R            # assertr schema enforcement
-  transform.R           # Fuzzy join + discrepancy detection
+  transform.R           # Fuzzy join, discrepancy detection, freeze enrichment
   visualize.R           # ggplot2 charts (GW visual style)
   utils.R               # Shared HTTP, date parsing, logging
 tests/
   testthat/test-parsers.R   # 230 tests covering all modules
 _targets.R                  # Pipeline orchestration
 ```
+
+### Data Quality Flags
+
+| Flag | Dataset | Description |
+|---|---|---|
+| `flag_negative_outlay` | Awards | Negative outlays (accounting adjustments) |
+| `flag_over_disbursed` | Awards | Outlays > 150% of award amount |
+| `flag_date_inverted` | Awards | End date before start date |
+| `flag_zero_award` | Awards | $0 award amount |
+| `flag_future_date` | Awards | Action date in the future |
+| `flag_cfda_mismatch` | Awards | CFDA prefix doesn't match agency |
+| `flag_international` | Notices | Canadian province (cross-border grant) |
+| `flag_invalid_state` | Notices | Unrecognized state/territory code |
+| `flag_bad_grant_number` | Notices | Malformed grant number for agency |
+| `flag_amount_mismatch` | Joined | >25% gap between sources (exact matches only) |
+
+</details>
 
 ## License
 

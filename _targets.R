@@ -43,10 +43,24 @@ list(
   tar_target(discrepancies, join_and_flag(validated_notices, validated_awards)),
   tar_target(discrepancy_summary, summarize_discrepancies(discrepancies)),
 
+  # Transaction-level data for freeze grants
+  tar_target(
+    transaction_data,
+    fetch_transactions(
+      discrepancies$grant_number[discrepancies$discrepancy_type == "possible_freeze"]
+    )
+  ),
+
+  # Enrich discrepancies with transaction-level freeze confidence
+  tar_target(
+    discrepancies_enriched,
+    enrich_with_transactions(discrepancies, transaction_data)
+  ),
+
   # Visualize
   tar_target(
     plot_files,
-    save_plots(validated_notices, discrepancies, discrepancy_summary),
+    save_plots(validated_notices, discrepancies_enriched, discrepancy_summary),
     format = "file"
   ),
 
@@ -55,7 +69,7 @@ list(
     export_parquet,
     {
       dir.create("output", showWarnings = FALSE)
-      arrow::write_parquet(discrepancies, "output/discrepancies.parquet")
+      arrow::write_parquet(discrepancies_enriched, "output/discrepancies.parquet")
       "output/discrepancies.parquet"
     },
     format = "file"

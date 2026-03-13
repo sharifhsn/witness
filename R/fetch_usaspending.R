@@ -239,4 +239,187 @@ fetch_usaspending <- function(
   combined
 }
 
+# --------------------------------------------------------------------------- #
+# Transaction-level fetcher
+# --------------------------------------------------------------------------- #
+
+# Fields for transaction-level queries
+TRANSACTION_FIELDS <- c(
+  "Award ID",
+  "Action Date",
+  "Transaction Amount",
+  "Transaction Description",
+  "Action Type",
+  "Mod"
+)
+
+#' Build the JSON body for one transaction search page.
+#' @param award_ids Character vector of Award IDs to filter on.
+#' @param page Integer page number.
+#' @param limit Records per page (max 100).
+#' @return List suitable for `req_body_json()`.
+#' @keywords internal
+build_transaction_body <- function(award_ids, page, limit = 100L) {
+  limit <- min(limit, USASPENDING_MAX_PAGE_SIZE)
+  list(
+    filters = list(
+      award_type_codes = GRANT_AWARD_CODES,
+      award_ids = as.list(award_ids)
+    ),
+    fields = TRANSACTION_FIELDS,
+    page   = page,
+    limit  = limit,
+    sort   = "Action Date",
+    order  = "desc"
+  )
+}
+
+#' Fetch one page of transaction search results.
+#' @param body Request body list from `build_transaction_body()`.
+#' @return List with `results` (tibble) and `has_next` (logical).
+#' @keywords internal
+fetch_transaction_page <- function(body) {
+  url <- "https://api.usaspending.gov/api/v2/search/spending_by_transaction/"
+
+  resp <- tryCatch(
+    {
+      req <- build_request(url) |>
+        httr2::req_method("POST") |>
+        httr2::req_body_json(body) |>
+        httr2::req_error(is_error = function(resp) FALSE)
+      raw_resp <- httr2::req_perform(req)
+      if (httr2::resp_status(raw_resp) >= 400) {
+        err_body <- tryCatch(httr2::resp_body_string(raw_resp), error = function(e) "(no body)")
+        log_event(sprintf(
+          "Transaction page %d HTTP %d: %s", body$page,
+          httr2::resp_status(raw_resp), substr(err_body, 1, 300)
+        ), "ERROR")
+        NULL
+      } else {
+        raw_resp
+      }
+    },
+    error = function(e) {
+      log_event(sprintf("Transaction page %d failed: %s", body$page, conditionMessage(e)), "ERROR")
+      NULL
+    }
+  )
+
+  if (is.null(resp)) {
+    return(list(results = dplyr::tibble(), has_next = FALSE))
+  }
+
+  parsed <- tryCatch(
+    httr2::resp_body_json(resp, simplifyVector = FALSE),
+    error = function(e) {
+      log_event(sprintf("Transaction JSON parse failed on page %d: %s", body$page, conditionMessage(e)), "ERROR")
+      NULL
+    }
+  )
+
+  if (is.null(parsed)) {
+    return(list(results = dplyr::tibble(), has_next = FALSE))
+  }
+
+  has_next <- isTRUE(parsed$page_metadata$hasNext)
+
+  if (length(parsed$results) == 0L) {
+    return(list(results = dplyr::tibble(), has_next = FALSE))
+  }
+
+  n <- length(parsed$results)
+  award_ids  <- character(n)
+  dates_raw  <- character(n)
+  amounts    <- double(n)
+  descs      <- character(n)
+  act_types  <- character(n)
+  mods       <- character(n)
+
+  for (i in seq_len(n)) {
+    r <- parsed$results[[i]]
+    award_ids[i]  <- r[["Award ID"]]                %||% NA_character_
+    dates_raw[i]  <- as.character(r[["Action Date"]] %||% NA_character_)
+    amounts[i]    <- as.numeric(r[["Transaction Amount"]] %||% NA_real_)
+    descs[i]      <- r[["Transaction Description"]]  %||% NA_character_
+    act_types[i]  <- r[["Action Type"]]              %||% NA_character_
+    mods[i]       <- r[["Mod"]]                      %||% NA_character_
+  }
+
+  rows <- dplyr::tibble(
+    grant_number         = award_ids,
+    transaction_date     = parse_date_flexible(dates_raw),
+    obligation_amount    = amounts,
+    transaction_desc     = descs,
+    action_type          = act_types,
+    modification_number  = mods
+  )
+
+  list(results = rows, has_next = has_next)
+}
+
+#' Fetch transaction-level data for a set of award IDs
+#'
+#' Queries USAspending transaction search in batches (to keep filter lists
+#' manageable) and paginates each batch. Used to determine the actual last
+#' disbursement date for possible-freeze grants.
+#'
+#' @param award_ids Character vector of Award IDs (grant_number values).
+#' @param batch_size Number of award IDs per API query. Default 25.
+#' @param max_pages Maximum pages to fetch per batch. Default 10.
+#' @return Tibble with columns: grant_number, transaction_date,
+#'   obligation_amount, transaction_desc, action_type, modification_number.
+#' @export
+fetch_transactions <- function(award_ids, batch_size = 25L, max_pages = 10L) {
+  award_ids <- unique(award_ids[!is.na(award_ids)])
+
+  if (length(award_ids) == 0L) {
+    log_event("fetch_transactions: no award IDs provided", "WARN")
+    return(dplyr::tibble(
+      grant_number = character(0), transaction_date = as.Date(character(0)),
+      obligation_amount = double(0), transaction_desc = character(0),
+      action_type = character(0), modification_number = character(0)
+    ))
+  }
+
+  log_event(sprintf(
+    "fetch_transactions: %d unique award IDs, batch_size=%d",
+    length(award_ids), batch_size
+  ))
+
+  batches <- split(award_ids, ceiling(seq_along(award_ids) / batch_size))
+  all_results <- vector("list", length(batches))
+
+  for (b in seq_along(batches)) {
+    batch_ids <- batches[[b]]
+    log_event(sprintf("  Batch %d/%d (%d IDs)", b, length(batches), length(batch_ids)))
+
+    batch_pages <- vector("list", max_pages)
+    page_idx <- 0L
+    page <- 1L
+
+    repeat {
+      body <- build_transaction_body(batch_ids, page)
+      page_data <- fetch_transaction_page(body)
+
+      if (nrow(page_data$results) > 0L) {
+        page_idx <- page_idx + 1L
+        batch_pages[[page_idx]] <- page_data$results
+      }
+
+      if (!page_data$has_next || nrow(page_data$results) == 0L || page >= max_pages) {
+        break
+      }
+      page <- page + 1L
+    }
+
+    if (page_idx > 0L) {
+      all_results[[b]] <- dplyr::bind_rows(batch_pages[seq_len(page_idx)])
+    }
+  }
+
+  combined <- dplyr::bind_rows(all_results)
+  log_event(sprintf("fetch_transactions complete: %d transactions", nrow(combined)))
+  combined
+}
+
 # %||% is defined in utils.R (canonical location)

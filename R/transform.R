@@ -416,3 +416,78 @@ summarize_discrepancies <- function(joined_df) {
 
   award_is_active & (no_outlays | low_outlays)
 }
+
+
+# --------------------------------------------------------------------------- #
+# Transaction-level enrichment
+# --------------------------------------------------------------------------- #
+
+# Thresholds for freeze confidence based on days since last transaction
+FREEZE_HIGH_DAYS   <- 180L
+FREEZE_MEDIUM_DAYS <- 90L
+
+#' Enrich discrepancies with transaction-level freeze confidence
+#'
+#' Joins transaction data onto discrepancies to compute the actual last
+#' disbursement date for each grant, enabling a more precise freeze heuristic
+#' than the aggregate outlay ratio alone.
+#'
+#' @param discrepancies Tibble from [join_and_flag()].
+#' @param transactions Tibble from [fetch_transactions()].
+#' @return Discrepancies tibble with added columns: last_transaction_date,
+#'   days_since_last_transaction, freeze_confidence.
+#' @export
+enrich_with_transactions <- function(discrepancies, transactions) {
+  if (nrow(transactions) == 0L) {
+    log_event("enrich_with_transactions: no transactions to join", "WARN")
+    return(discrepancies |>
+      dplyr::mutate(
+        last_transaction_date      = as.Date(NA),
+        days_since_last_transaction = NA_integer_,
+        freeze_confidence          = NA_character_
+      ))
+  }
+
+  # Compute per-grant transaction summary
+  txn_summary <- transactions |>
+    dplyr::filter(!is.na(transaction_date)) |>
+    dplyr::group_by(grant_number) |>
+    dplyr::summarise(
+      last_transaction_date = max(transaction_date, na.rm = TRUE),
+      n_transactions        = dplyr::n(),
+      total_obligated        = sum(obligation_amount, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(
+      days_since_last_transaction = as.integer(Sys.Date() - last_transaction_date),
+      freeze_confidence = dplyr::case_when(
+        days_since_last_transaction > FREEZE_HIGH_DAYS   ~ "high",
+        days_since_last_transaction > FREEZE_MEDIUM_DAYS ~ "medium",
+        TRUE                                              ~ "low"
+      )
+    )
+
+  log_event(sprintf(
+    "Transaction summary: %d grants, freeze confidence: high=%d, medium=%d, low=%d",
+    nrow(txn_summary),
+    sum(txn_summary$freeze_confidence == "high", na.rm = TRUE),
+    sum(txn_summary$freeze_confidence == "medium", na.rm = TRUE),
+    sum(txn_summary$freeze_confidence == "low", na.rm = TRUE)
+  ))
+
+  result <- discrepancies |>
+    dplyr::left_join(
+      txn_summary |> dplyr::select(
+        grant_number, last_transaction_date,
+        days_since_last_transaction, freeze_confidence
+      ),
+      by = "grant_number"
+    )
+
+  log_event(sprintf(
+    "enrich_with_transactions: %d/%d discrepancies matched to transactions",
+    sum(!is.na(result$last_transaction_date)), nrow(result)
+  ))
+
+  result
+}
