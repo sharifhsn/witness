@@ -1,53 +1,70 @@
 # Grant Witness PoC
 
-**693 federal grants show active spending despite termination notices.**
+**693 federal grants are receiving active outlays despite termination notices.**
 
-This pipeline cross-references NIH and NSF grant termination data against official USAspending.gov records to find grants where government reporting contradicts observed termination activity. Built as a proof-of-concept extension of [Grant Witness](https://grant-witness.us/).
+This pipeline cross-references NIH and NSF termination data against official USAspending.gov records to surface discrepancies in federal grant execution. Built as a proof-of-concept extension of [Grant Witness](https://grant-witness.us/).
 
 **[Live Dashboard](https://sharifhsn.github.io/witness/)**
 
-## What This Discovers
+## What This Finds
 
-| Discrepancy | What It Means | Count |
+| Discrepancy Type | What It Means | Count |
 |---|---|---|
-| **Active Despite Terminated** | USAspending shows live outlays on a grant that termination notices say is dead | 693 |
-| **Possible Freeze** | Award period is open, confirmed low or zero disbursements (<10% outlay ratio). Note: uses current outlay ratio, not outlay state at time of targeting — see methodology notes below | 4,660 |
-| **Possible Freeze (No Data)** | Award period is open but outlay data is missing — cannot confirm or rule out freeze | 280 |
+| **Active Despite Terminated** | USAspending shows live outlays on a grant termination notices say is dead | 693 |
+| **Possible Freeze (confirmed)** | Open award period + confirmed low/zero disbursements (<10% outlay ratio) | 4,660 |
+| **Possible Freeze (no data)** | Open award period, outlay data missing — freeze cannot be confirmed or ruled out | 280 |
 | **Untracked** | Official awards from tracked agencies with no corresponding forensic notice | 11,310 |
 
-The `possible_freeze` category is further triaged by **elapsed time** and **transaction-level data**. Transaction-level analysis assigns freeze confidence (high/medium/low) based on the actual last disbursement date. Awards >$1B (Medicaid entitlements, umbrella contracts) are flagged separately to avoid distorting aggregate statistics.
+The pipeline goes three layers deep — individual grants, program-level patterns, and agency budget execution — each using independent data sources.
 
-## Methodology
+## Three Layers of Analysis
 
-```
-NIH Reporter API ──┐                                  ┌── Discrepancy Flags
-                    ├── Validate ──┐                   ├── Transaction-Level Freeze Analysis
-NSF Terminated CSV ─┘              ├── Join & Flag ────┤── Visualizations
-                                   │                   └── Parquet + DB Export
-USAspending.gov API ── Validate ───┘
-```
+### Layer 1 — Grant-Level Cross-Reference
 
-**Fuzzy join precision tuning** — NIH grant numbers don't match USAspending Award IDs, so matching requires organization name similarity. Initial Jaro-Winkler matching at threshold 0.15 produced a 71% false positive rate ("University of Chicago" matched "University of Utah"). Tightened to 0.08 and added a distinctive-token filter requiring shared non-stopword tokens. Result: 2,498 fuzzy matches with high precision.
+Cross-references termination notices against USAspending award records. The core technical challenge: NIH grant numbers don't match USAspending award IDs, requiring fuzzy matching on organization names. Two-pass approach:
 
-**10 automated quality flags** catch data anomalies across both datasets: negative outlays (accounting adjustments), over-disbursement (>150% of award), inverted dates, zero awards, future dates, CFDA mismatches, international grants, invalid states, malformed grant numbers, and amount discrepancies between sources.
+1. **Exact match** on grant number (works for NSF, which uses the same 7-digit ID in both systems): 489 matches
+2. **Fuzzy match** on organization name — Jaro-Winkler distance ≤ 0.08 plus a distinctive-token filter requiring shared non-stopword tokens. Initial threshold of 0.15 produced 71% false positives ("University of Chicago" → "University of Utah"); tightened to 2,498 high-precision matches.
 
-**Transaction-level freeze confirmation** — For grants flagged as possible freezes, the pipeline fetches individual transaction records from USAspending to determine when the last actual disbursement occurred. Grants with >180 days since last transaction are classified as high-confidence freezes.
+**Transaction-level freeze confirmation** — For freeze-flagged grants, the pipeline fetches individual transaction records to determine when the last disbursement actually occurred. Grants with >180 days since last transaction are classified as high-confidence freezes.
 
-**File C temporal reconstruction** — Period-by-period outlay data from USAspending File C (`/api/v2/awards/funding/`) enables temporal freeze reconstruction: checking whether outlays were $0 during each month of an institutional freeze, not just the aggregate ratio. Combined with Grant Witness targeting dates, computes `outlays_before_targeting`, `outlays_during_targeting`, and `months_zero_during_freeze`. Produces a `freeze_evidence` classification: confirmed_freeze (3+ zero months + 180d gap), likely_freeze, possible_freeze, likely_not_frozen, or confirmed_not_frozen.
+**File C temporal reconstruction** — Period-by-period outlay data from USAspending File C (`/api/v2/awards/funding/`) enables reconstructing outlay state at the time of institutional targeting, not just the current aggregate ratio. Combined with Grant Witness targeting dates, computes `outlays_before_targeting`, `outlays_during_targeting`, and `months_zero_during_freeze`. Produces a five-tier `freeze_evidence` classification: confirmed_freeze / likely_freeze / possible_freeze / likely_not_frozen / confirmed_not_frozen.
 
-### Known Methodology Gaps vs. Grant Witness
+### Layer 2 — Program-Level YoY Comparison
 
-Our `possible_freeze` flag uses a different (and less precise) methodology than Grant Witness's frozen grant detection:
+**CFDA program breakdown** (`fetch_cfda_breakdown`) queries USAspending's `spending_by_category/cfda/` endpoint to compare FY2026 award counts and obligations against FY2025 baselines by CFDA program code. This surfaces *which programs* are being frozen, not just which institutions.
 
-1. **We use current outlay ratio; GW uses outlay state at time of targeting.** GW's Feb 2026 update ("Refining our criteria for 'frozen' NIH grants") showed that using current outlays produces false negatives: grants that were frozen then unfrozen may appear fully paid out now. The fix is to subtract post-freeze outlays from current totals to reconstruct the state at freeze onset. We don't do this yet.
+Verified numbers from live API (FY2026 Oct–Mar vs FY2025 Oct–Mar):
+- NSF total new grants: −65% (2,072 vs 5,929)
+- NIH total new grants: −21% (24,054 vs 30,520)
 
-2. **We flag any active award with low outlays; GW requires a known targeted institution.** GW only classifies grants as frozen at 8 specific universities (Harvard, Columbia, Brown, Cornell, Weill Cornell, Northwestern, Duke, UPenn). Our approach is broader but less precise — many grants legitimately have low outlays.
+**Award obligation flow** (`fetch_award_obligations_flow`) queries `spending_over_time` for month-by-month new obligation rates, providing a flow signal that complements the stock signal from GTAS.
 
-3. **We don't track reinstatements.** GW tracks "Possibly Reinstated" (date re-extension or court order) and "Reinstated" (confirmed by subsequent outlay). We have no reinstatement logic.
+### Layer 3 — Agency Budget Execution (GTAS)
 
-4. **File C integration (partially closed).** We now fetch USAspending File C data (`/api/v2/awards/funding/`) for freeze-relevant grants, enabling temporal reconstruction and `freeze_evidence` classification (confirmed/likely/possible). However, our File C fetch is per-award (not bulk), so we only cover grants already flagged — GW processes File C for their entire database.
+**`fetch_agency_obligations`** queries the `budgetary_resources` endpoint (`/api/v2/agency/{toptier_code}/budgetary_resources/`), which is sourced directly from Treasury's GTAS system — independent of award-level USAspending data. Returns period-by-period cumulative obligations for each agency.
 
-## Key Results
+This is a different claim than Layer 1: not "these specific grants are frozen" but "the agency's entire new-obligation pipeline has collapsed":
+- NSF FY2026 P4 (through January): $544M vs $1,051M in FY2025 — **−48% YoY**
+
+Grant Witness does not use GTAS data. The job posting explicitly lists Treasury Fiscal Data hub as a platform the data scientist should examine.
+
+> **`feature/macro-signals` branch** adds a fourth layer: Daily Treasury Statement (1-day lag real-time withdrawal signal) and obligation drought analysis framing the shortfall as an "iceberg" — GW's tracked terminations are the visible tip; the obligation drought is the submerged portion GW's methodology cannot see.
+
+## Calibration Against Grant Witness Ground Truth
+
+The pipeline downloads GW's published NIH labeled dataset and calibrates our freeze detection against it:
+
+1. Joins GW's labeled grants to our USAspending data by award ID
+2. Measures precision/recall of the `outlay_ratio < 10%` heuristic
+3. Sweeps thresholds to find the F1-optimal cutoff
+4. Trains a logistic regression classifier using pipeline features (outlay ratio, time since last transaction, File C monthly pattern, award amount)
+5. Analyzes the temporal reconstruction gap (current vs. at-targeting outlays)
+6. Examines the Duke anomaly (Dec 2025 outlays during an active freeze)
+
+**Key methodology gap vs. GW:** GW's Feb 2026 "Refining our criteria" update reconstructs outlay state at the time of targeting by subtracting post-freeze transactions. Our `possible_freeze` uses the current ratio — producing false negatives for grants that were frozen and later unfrozen. The calibration pipeline quantifies this gap explicitly.
+
+## Key Numbers
 
 | Metric | Value |
 |---|---|
@@ -60,23 +77,28 @@ Our `possible_freeze` flag uses a different (and less precise) methodology than 
 | Possible Freeze (confirmed) | 4,660 |
 | Possible Freeze (no data) | 280 |
 | Untracked (no forensic notice) | 11,310 |
+| NSF GTAS FY2026 P4 vs FY2025 | −48% ($544M vs $1,051M) |
+| NSF CFDA award count YoY | −65% (FY2026 Oct–Mar) |
+| NIH CFDA award count YoY | −21% (FY2026 Oct–Mar) |
 
-## Novel Contributions
+## Novel Contributions vs. Grant Witness
 
 Verified against the [full Grant Witness website](https://grant-witness.us/) as of March 2026.
 
 | Capability | Grant Witness | This PoC |
 |---|---|---|
-| Active-despite-terminated detection | Not available — no cross-reference of outlays vs. termination status | Flags 693 grants still receiving outlays despite termination notices |
-| Institution-agnostic freeze detection | Requires knowing which institutions are targeted (8 named universities) | Flags any grant with low outlay ratio, potentially catching freezes before they're public |
-| Automated data quality flags | Acknowledges data quality issues in prose; no systematic flagging | 10 automated flags quantifying source disagreement (24 exact matches with >25% amount discrepancy) |
-| Cross-agency unified view | Separate pages and reports per agency | Single joined dataset across NIH + NSF + EPA |
-| NIH institute-level breakdown | Blog post narrative (May 2025) with per-IC analysis | Automated per-IC counts on every pipeline run (programmatic, not one-off) |
-| Obligation vs. outlay analysis | Uses File C period-by-period outlays at targeted institutions | Aggregate outlay ratio on any active award (broader but less precise) |
-| Transaction-level timelines | File C monthly aggregates for freeze detection | Individual disbursement events from USAspending transactions endpoint |
-| Treasury Fiscal Data integration | Not used | MTS Table 5 bureau-level outlays as macro early warning signal — detects spending drops 1-2 months before USAspending |
+| Active-despite-terminated detection | Not available | Flags 693 grants still receiving outlays after termination notices |
+| Institution-agnostic freeze detection | Requires named targeted institution (8 universities) | Flags any grant with low outlay ratio — wider net, calibrated precision |
+| File C temporal reconstruction | Core of freeze detection | Implemented for freeze-flagged grants; `freeze_evidence` 5-tier classification |
+| CFDA program-level YoY breakdown | Not available | Which NSF/NIH programs are hardest hit, not just which institutions |
+| GTAS agency budget execution | Not available | Independent Treasury-sourced obligation rate; NSF P4 −48% YoY |
+| Data quality flags | Prose acknowledgements | 10 automated flags quantifying source disagreement |
+| Cross-agency unified view | Separate reports per agency | Single joined dataset across NIH + NSF + EPA |
+| Subaward flow analysis | Not available | Downstream sub-recipient exposure for terminated prime awards |
+| De-obligation spike detection | Not available | Early clawback signal; de-obligations precede outlay drops |
+| GW calibration | Produces ground truth | Evaluates our heuristics against their labeled dataset |
 
-**What Grant Witness does that we don't (yet):** reinstatement tracking (Possibly Reinstated / Reinstated), crowdsourced PI self-reports, SAMHSA and CDC agency coverage, flagged-word analysis, RCDC spending category ML predictions, overdue funding detection, event history tracking (multiple rounds of termination/reinstatement). Note: File C integration and temporal freeze reconstruction are now partially implemented — see methodology section.
+**What GW does that this PoC doesn't (yet):** reinstatement tracking, crowdsourced PI self-reports, SAMHSA and CDC coverage, TAGGS PDF integration, outlay-state-at-targeting reconstruction, overdue funding detection, RCDC spending category ML model.
 
 ## Visualizations
 
@@ -87,56 +109,14 @@ Verified against the [full Grant Witness website](https://grant-witness.us/) as 
 
 ![State Map](output/state_map.png)
 
-## Novel Data Signals (Not in Grant Witness)
-
-### Subaward Flow Analysis
-Tracks money flowing from prime recipients to sub-recipients via USAspending's subaward search. Detects:
-- **Frozen grants with active subawards** — workaround patterns where institutional freezes don't block downstream money flow
-- **Terminated grants still paying subawardees** — contradictions invisible to prime-award-level analysis
-- **Downstream institution impact** — which smaller institutions are affected by freezes at major research universities
-
-### Treasury Fiscal Data Early Warning
-Queries Treasury's Monthly Treasury Statement (MTS Table 5) for bureau-level outlays with ~30 day lag — detecting agency spending drops 1-2 months before USAspending grant-level data reflects them. Detects:
-- **Month-over-month anomalies** — >20% outlay drops at NIH, NSF, CDC, SAMHSA, EPA
-- **Year-over-year anomalies** — >15% drops vs same month prior year
-- **Z-score outliers** — outlays >2 standard deviations below trailing 12-month mean
-- **Cross-reference corroboration** — do macro spending drops at an agency correlate with our grant-level freeze flags?
-
-Grant Witness does not use Treasury Fiscal Data. The job posting explicitly lists Treasury Fiscal Data hub as a platform the data scientist should examine.
-
-### De-obligation Spike Detection
-Identifies fund clawbacks (negative obligations) in transaction data as an **early warning signal**. De-obligations precede outlay drops — money gets pulled back before disbursements stop. Detects:
-- **Per-grant de-obligation events** — individual grants losing funding
-- **Agency-month spikes** — coordinated rescission patterns across multiple awards (>2x median monthly rate)
-
-Grant Witness monitors outlays dropping to $0 but does not surface de-obligation patterns as a distinct signal.
-
-## Freeze Heuristic Calibration
-
-We calibrate our freeze detection against Grant Witness's published labeled dataset
-([analysis report](analysis/freeze_calibration.qmd)). The calibration pipeline:
-
-1. Downloads GW's NIH CSV with labeled frozen/unfrozen/terminated grants
-2. Joins to our USAspending data by award ID (exact match)
-3. Measures precision/recall of our `outlay_ratio < 10%` heuristic
-4. Sweeps thresholds to find the F1-optimal cutoff
-5. Trains a logistic regression classifier using pipeline features
-6. Analyzes the temporal reconstruction gap (current vs. at-targeting outlays)
-7. Examines the Duke anomaly (Dec 2025 outlays during active freeze)
-
-## Production Readiness
-
-- **Weekly automated runs** via GitHub Actions (Monday 06:00 UTC)
-- **PostgreSQL-ready** — set `DATABASE_URL` env var to enable export
-- **Airtable-compatible schema** — designed for integration with existing Grant Witness Airtable bases
-- **Reproducible** — `renv.lock` pins all R dependencies; `{targets}` caches intermediate results
-
 ## Running the Pipeline
 
 ```r
 renv::restore()        # Install dependencies
 targets::tar_make()    # Run the full pipeline
 ```
+
+Data is cached in `data/raw/*.rds` — delete a file (or run `scripts/fetch_data.R --force <name>`) to re-fetch from the live API.
 
 <details>
 <summary>Technical Details</summary>
@@ -147,40 +127,45 @@ targets::tar_make()    # Run the full pipeline
 notices_nih ─────┐
                  ├─ validated_notices ─┐
 notices_nsf ─────┘                     │
-                                       ├─ discrepancies ─┬─ transaction_data
-usaspending_awards ─ validated_awards ─┘                 ├─ discrepancies_enriched ─┐
-                                                         ├─ discrepancy_summary    │
-                                                         └─ file_c_probe           │
-                                                              │                    │
-                                                         file_c_data ──────────────┤
-                                                              │                    │
-gw_nih_data ─── targeting_lookup ─── file_c_features ──────────┤
+                                       ├─ discrepancies ─┬─ transaction_data ─┬─ termination_actions
+usaspending_awards ─ validated_awards ─┘                 │                   ├─ reinstatement_patterns
+                                                         │                   ├─ deobligation_summary
+                                                         │                   └─ deobligation_spikes
+                                                         ├─ discrepancy_summary
+                                                         └─ file_c_probe
                                                               │
-                                                    discrepancies_file_c ──────────┐
-                                                         ├─ plot_files             │
-                                                         └─ export_parquet         │
-                                                                                   │
-subaward_data ─── subaward_analysis ◄──────────────────────────────────────────────┤
-transaction_data ─┬─ deobligation_summary                                          │
-                  └─ deobligation_spikes                                           │
-                                                                                   │
-treasury_mts_data ─┬─ treasury_anomalies ─┬─ treasury_anomalies_enriched ◄───────┤
-                   │                      └─ treasury_file_c_corroboration ◄──────┤
-                   └─ treasury_plots ◄──────────────────────────────────────────┤
-                                                                                │
-gw_nih_data ── calibration_data ◄──────────────────────────────────────────────┘
-                   └─ calibration_features ─┬─ calibration_results
-                                            ├─ temporal_analysis
-                                            ├─ freeze_classifier
-                                            └─ calibration_plots
+                                                         file_c_data ────────────────────────┐
+                                                              │                             │
+gw_nih_data ─┬─ targeting_lookup ─── file_c_features ────────┤                             │
+             │                                               │                             │
+             └─ calibration_data ─── calibration_features ─┬─ calibration_results         │
+                                                           ├─ freeze_classifier            │
+                                                           ├─ temporal_analysis            │
+                                                           └─ calibration_plots            │
+                                                                                           ▼
+                                                         discrepancies_file_c ─┬─ discrepancies_emergency
+                                                              │                ├─ subaward_analysis
+                                                              ├─ plot_files    └─ subaward_impact
+                                                              └─ export_parquet
+
+cfda_breakdown          (CFDA program YoY — spending_by_category/cfda/)
+agency_obligations      (GTAS period obligations — agency/{code}/budgetary_resources/)
+award_obligations_flow  (transaction flow — spending_over_time/)
 ```
 
 ### Data Sources
 
-- [NIH Reporter API](https://api.reporter.nih.gov/) — terminated grant projects (offset cap: 14,999)
-- [NSF Terminated Awards CSV](https://nsf-gov-resources.nsf.gov/files/NSF-Terminated-Awards.csv) — Latin-1 encoded
-- [USAspending.gov API](https://api.usaspending.gov/) — award records (page cap: 100), transaction search, and File C funding data (period-by-period outlays)
-- [Treasury Fiscal Data API](https://fiscaldata.treasury.gov/) — MTS Table 5 bureau-level outlays (~30 day lag)
+| Source | Endpoint | Notes |
+|---|---|---|
+| NIH Reporter API | `api.reporter.nih.gov/v2/projects/search` | Offset cap: 14,999; paginated |
+| NSF Terminated Awards CSV | `nsf-gov-resources.nsf.gov/files/NSF-Terminated-Awards.csv` | Latin-1 encoding |
+| USAspending awards | `POST /api/v2/search/spending_by_award/` | Page cap: 100 |
+| USAspending transactions | `POST /api/v2/search/spending_by_transaction/` | Filter by `award_ids` |
+| USAspending File C | `POST /api/v2/awards/funding/` | Requires `generated_internal_id` |
+| USAspending GTAS | `GET /api/v2/agency/{toptier_code}/budgetary_resources/` | All FY in one call |
+| USAspending CFDA | `POST /api/v2/search/spending_by_category/cfda/` | Category in URL path |
+| USAspending spending flow | `POST /api/v2/search/spending_over_time/` | `"group": "month"` |
+| Grant Witness CSVs | `grant-witness.us/data/` | Ground truth for calibration |
 
 ### Tech Stack
 
@@ -188,30 +173,26 @@ gw_nih_data ── calibration_data ◄─────────────�
 - **httr2** for polite API access (rate limiting, retries, exponential backoff)
 - **fuzzyjoin** for Jaro-Winkler string-distance matching
 - **assertr** for runtime data validation
-- **ggplot2** with viridis palette matching Grant Witness visual style
+- **ggplot2** matching Grant Witness visual style
 
 ### Project Structure
 
 ```
 R/
-  scrape_nih.R              # NIH Reporter API scraper
+  scrape_nih.R              # NIH Reporter API v2 paginated scraper
   scrape_nsf.R              # NSF Terminated Awards CSV parser
-  fetch_usaspending.R       # USAspending.gov award + transaction fetcher
-  fetch_file_c.R            # USAspending File C period-by-period outlay fetcher
-  fetch_gw.R                # Grant Witness CSV downloader + File C parser
-  fetch_treasury.R          # Treasury Fiscal Data MTS Table 5 fetcher
-  validate.R                # assertr schema enforcement
-  transform.R               # Fuzzy join, discrepancy detection, freeze enrichment
-  detect_treasury_anomalies.R # Treasury spending anomaly detection + cross-referencing
-  calibrate_freeze.R        # Calibration analysis against GW ground truth
+  fetch_usaspending.R       # USAspending awards, transactions, subawards
+  fetch_file_c.R            # File C period-by-period outlay fetcher
+  fetch_usaspending_budget.R # GTAS obligations, CFDA breakdown, award flow
+  fetch_gw.R                # Grant Witness CSV downloader + parser
+  transform.R               # Fuzzy join, discrepancy flags, freeze enrichment
+  calibrate_freeze.R        # Calibration against GW ground truth
+  validate.R                # assertr schema enforcement + data quality flags
   visualize.R               # ggplot2 charts (GW visual style)
   visualize_calibration.R   # Calibration-specific plots
-  visualize_treasury.R      # Treasury timeline + anomaly corroboration plots
   utils.R                   # Shared HTTP, date parsing, logging
-analysis/
-  freeze_calibration.qmd    # Reproducible calibration report
 tests/
-  testthat/test-parsers.R   # Unit tests
+  testthat/test-parsers.R   # 404 assertions across all modules
 _targets.R                  # Pipeline orchestration
 ```
 
@@ -224,13 +205,13 @@ _targets.R                  # Pipeline orchestration
 | `flag_date_inverted` | Awards | End date before start date |
 | `flag_zero_award` | Awards | $0 award amount |
 | `flag_future_date` | Awards | Action date in the future |
-| `flag_cfda_mismatch` | Awards | CFDA prefix doesn't match agency |
-| `flag_international` | Notices | Canadian province (cross-border grant) |
+| `flag_cfda_mismatch` | Awards | CFDA prefix doesn't match awarding agency |
+| `flag_international` | Notices | Canadian province code (cross-border NIH grant) |
 | `flag_invalid_state` | Notices | Unrecognized state/territory code |
-| `flag_bad_grant_number` | Notices | Malformed grant number for agency |
+| `flag_bad_grant_number` | Notices | Malformed grant number format for agency |
 | `flag_amount_mismatch` | Joined | >25% gap between sources (exact matches only) |
 | `flag_umbrella_award` | Joined | Award >$1B (Medicaid entitlements, umbrella contracts) |
-| `flag_missing_outlay_data` | Joined | Freeze flag based on missing data, not confirmed low outlays |
+| `flag_missing_outlay_data` | Joined | Freeze inferred from missing data, not confirmed low outlays |
 
 </details>
 
