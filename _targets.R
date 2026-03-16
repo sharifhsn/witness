@@ -243,28 +243,26 @@ list(
   # continuation-year fundings + amendments). Not lifetime award face value.
   tar_target(
     recipient_compression,
-    {
+    .rds_or("recipient_compression", function() {
       # baseline_end tracks today - 365 days so both windows are the same length.
       # Both NIH and NSF use the same cutoff to ensure comparable YoY metrics.
       baseline_end <- format(Sys.Date() - 365, "%Y-%m-%d")
-      .rds_or("recipient_compression", function()
-        dplyr::bind_rows(
-          fetch_recipient_compression(
-            agency_spec    = list(type = "awarding", tier = "subtier",
-                                  name = "National Institutes of Health"),
-            baseline_start = "2024-10-01",
-            baseline_end   = baseline_end,
-            current_start  = "2025-10-01"
-          ),
-          fetch_recipient_compression(
-            agency_spec    = list(type = "awarding", tier = "toptier",
-                                  name = "National Science Foundation"),
-            baseline_start = "2024-10-01",
-            baseline_end   = baseline_end,
-            current_start  = "2025-10-01"
-          )
+      dplyr::bind_rows(
+        fetch_recipient_compression(
+          agency_spec    = list(type = "awarding", tier = "subtier",
+                                name = "National Institutes of Health"),
+          baseline_start = "2024-10-01",
+          baseline_end   = baseline_end,
+          current_start  = "2025-10-01"
+        ),
+        fetch_recipient_compression(
+          agency_spec    = list(type = "awarding", tier = "toptier",
+                                name = "National Science Foundation"),
+          baseline_start = "2024-10-01",
+          baseline_end   = baseline_end,
+          current_start  = "2025-10-01"
         )
       )
-    }
+    })
   )
 )

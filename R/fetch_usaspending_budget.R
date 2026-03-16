@@ -618,11 +618,8 @@ fetch_recipient_compression <- function(
   }
 
   # Guard against duplicate recipient_ids from API (would cause row multiplication in joins).
-  # Use base R dedup instead of dplyr::distinct() — distinct() treats all NAs as equal and
-  # would silently drop institutions that share recipient_id=NA (no UEI/DUNS registration).
-  dedup_non_na <- function(df) df[!duplicated(df$recipient_id) | is.na(df$recipient_id), ]
-  baseline <- dedup_non_na(baseline)
-  current  <- dedup_non_na(current)
+  baseline <- .dedup_non_na_recipients(baseline)
+  current  <- .dedup_non_na_recipients(current)
 
   # Cutoff floor: minimum obligation amount in current top-N.
   # Institutions absent from current have spending somewhere in [0, cutoff_floor_M].
@@ -712,6 +709,18 @@ fetch_recipient_compression <- function(
 # --------------------------------------------------------------------------- #
 # Internal helpers for recipient compression
 # --------------------------------------------------------------------------- #
+
+#' Deduplicate a recipient tibble by recipient_id, preserving all NA rows.
+#'
+#' `dplyr::distinct()` treats all NAs as equal and would collapse multiple
+#' institutions that share `recipient_id = NA` (no UEI/DUNS) into one row,
+#' silently dropping data. This helper deduplicates only non-NA ids.
+#'
+#' @param df Tibble with a `recipient_id` column.
+#' @keywords internal
+.dedup_non_na_recipients <- function(df) {
+  df[!duplicated(df$recipient_id) | is.na(df$recipient_id), ]
+}
 
 #' Fetch top-N recipients by obligation amount for a date window.
 #' Returns recipient_id (UUID), recipient_name, amount_M.
