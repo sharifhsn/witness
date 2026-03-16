@@ -1922,6 +1922,23 @@ test_that("cutoff_floor_M equals minimum of current top-N", {
   expect_equal(min(current$amount_M, na.rm = TRUE), 12.5)
 })
 
+test_that("dedup_non_na preserves all NA recipient_ids and drops only non-NA dups", {
+  # dplyr::distinct(recipient_id, .keep_all=TRUE) collapses all NAs to one row,
+  # silently losing institutions with no UEI/DUNS registration.
+  # dedup_non_na must keep ALL NA rows while deduplicating non-NA ids.
+  dedup_non_na <- function(df) df[!duplicated(df$recipient_id) | is.na(df$recipient_id), ]
+  df <- dplyr::tibble(
+    recipient_id   = c("uuid-A", "uuid-A", NA_character_, NA_character_),
+    recipient_name = c("Alpha Univ", "Alpha Univ Dup", "No UEI Inst 1", "No UEI Inst 2"),
+    amount_M       = c(100.0, 5.0, 20.0, 15.0)
+  )
+  result <- dedup_non_na(df)
+  expect_equal(nrow(result), 3L)                                         # first uuid-A + both NAs
+  expect_equal(sum(is.na(result$recipient_id)), 2L)                      # both NA rows kept
+  expect_equal(sum(result$recipient_id == "uuid-A", na.rm = TRUE), 1L)  # only first uuid-A kept
+  expect_equal(result$recipient_name[!is.na(result$recipient_id)], "Alpha Univ")
+})
+
 test_that("SPENDING_BY_CATEGORY_BASE points to correct endpoint", {
   expect_true(grepl("spending_by_category", SPENDING_BY_CATEGORY_BASE))
   expect_true(grepl("api.usaspending.gov", SPENDING_BY_CATEGORY_BASE))
