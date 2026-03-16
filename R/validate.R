@@ -161,3 +161,112 @@ validate_awards <- function(df) {
   expected_agency <- .CFDA_AGENCY_MAP[prefix]
   !is.na(expected_agency) & !is.na(agency_name) & expected_agency != agency_name
 }
+
+# --------------------------------------------------------------------------- #
+# Data quality — USAspending reporting submission status
+# --------------------------------------------------------------------------- #
+
+#' Check USAspending data freshness and quality for key agencies
+#'
+#' Queries `/api/v2/reporting/agencies/overview/` to flag agencies with stale
+#' or uncertified submissions. Should be run before interpreting any drought
+#' analysis — a "missing data" finding may reflect submission lag, not actual
+#' spending behavior.
+#'
+#' @param fiscal_year Integer fiscal year. Default current FY.
+#' @param fiscal_period Integer fiscal period 2-12. Default most recent period.
+#' @param agency_codes Character vector of toptier codes to check.
+#' @return Tibble with columns: agency_name, toptier_code,
+#'   recent_publication_date, recent_publication_date_certified,
+#'   days_since_publication, unlinked_assistance_award_count,
+#'   obligation_difference, data_quality_flag.
+#' @export
+check_data_quality <- function(
+  fiscal_year   = .current_fiscal_year(),
+  fiscal_period = .current_fiscal_period(),
+  agency_codes  = unname(AGENCY_TOPTIER_CODES)
+) {
+  url <- sprintf(
+    "https://api.usaspending.gov/api/v2/reporting/agencies/overview/?fiscal_year=%d&fiscal_period=%d&limit=100",
+    as.integer(fiscal_year),
+    as.integer(fiscal_period)
+  )
+
+  log_event(sprintf(
+    "check_data_quality: FY%d P%d, %d agencies",
+    fiscal_year, fiscal_period, length(agency_codes)
+  ))
+
+  raw <- .usaspending_get(url, label = "reporting/agencies/overview")
+  if (is.null(raw)) {
+    log_event("check_data_quality: API call failed", "WARN")
+    return(.empty_data_quality_tibble())
+  }
+
+  results <- raw[["results"]] %||% list()
+  if (length(results) == 0L) return(.empty_data_quality_tibble())
+
+  rows <- lapply(results, function(r) {
+    pub_date <- tryCatch(
+      as.Date(substr(as.character(r[["recent_publication_date"]] %||% NA_character_), 1L, 10L)),
+      error = function(e) as.Date(NA)
+    )
+    dplyr::tibble(
+      agency_name                       = as.character(r[["agency_name"]]    %||% NA_character_),
+      toptier_code                      = as.character(r[["toptier_code"]]   %||% NA_character_),
+      recent_publication_date           = pub_date,
+      recent_publication_date_certified = isTRUE(r[["recent_publication_date_certified"]]),
+      days_since_publication            = as.integer(Sys.Date() - pub_date),
+      unlinked_assistance_award_count   = as.integer(r[["unlinked_assistance_award_count"]] %||% NA_integer_),
+      obligation_difference             = .safe_as_numeric(r[["obligation_difference"]]),
+      data_quality_flag                 = (
+        !isTRUE(r[["recent_publication_date_certified"]]) ||
+        (as.integer(Sys.Date() - pub_date) > 45L)
+      )
+    )
+  })
+
+  combined <- dplyr::bind_rows(rows)
+  if (length(agency_codes) > 0L) {
+    combined <- combined |> dplyr::filter(toptier_code %in% agency_codes)
+  }
+
+  flagged <- sum(combined$data_quality_flag, na.rm = TRUE)
+  if (flagged > 0L) {
+    log_event(sprintf(
+      "check_data_quality: %d/%d agencies have data quality flags",
+      flagged, nrow(combined)
+    ), "WARN")
+  }
+  combined
+}
+
+#' @keywords internal
+.current_fiscal_year <- function() {
+  today <- Sys.Date()
+  yr    <- as.integer(format(today, "%Y"))
+  mo    <- as.integer(format(today, "%m"))
+  if (mo >= 10L) yr + 1L else yr
+}
+
+#' @keywords internal
+.current_fiscal_period <- function() {
+  today <- Sys.Date()
+  mo    <- as.integer(format(today, "%m"))
+  raw_fp <- if (mo >= 10L) mo - 9L else mo + 3L
+  min(max(raw_fp - 1L, 2L), 11L)
+}
+
+#' @keywords internal
+.empty_data_quality_tibble <- function() {
+  dplyr::tibble(
+    agency_name                       = character(0),
+    toptier_code                      = character(0),
+    recent_publication_date           = as.Date(character(0)),
+    recent_publication_date_certified = logical(0),
+    days_since_publication            = integer(0),
+    unlinked_assistance_award_count   = integer(0),
+    obligation_difference             = double(0),
+    data_quality_flag                 = logical(0)
+  )
+}

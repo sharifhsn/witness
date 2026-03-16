@@ -19,7 +19,7 @@ tar_option_set(packages = c(
   "maps",       # state choropleth base data
   "mapproj",    # coord_map() projection support
   "tidyr",      # calibration analysis (unnest)
-  "slider",     # rolling window (detect_obligation_drought.R, feature/macro-signals)
+  "slider",     # rolling window for Treasury anomaly detection + DTS
   "rlang"       # tidy evaluation (File C temporal features)
 ))
 
@@ -156,6 +156,23 @@ list(
     detect_deobligation_spikes(transaction_data, discrepancies)
   ),
 
+  # Treasury Fiscal Data — early warning signal (macro-level outlays)
+  tar_target(treasury_mts_data, .rds_or("treasury_mts_data", fetch_mts_outlays, fiscal_years = c(2024L, 2025L, 2026L))),
+  tar_target(treasury_anomalies, detect_spending_anomalies(treasury_mts_data)),
+  tar_target(
+    treasury_anomalies_enriched,
+    cross_reference_anomalies(treasury_anomalies, discrepancies_file_c)
+  ),
+  tar_target(
+    treasury_file_c_corroboration,
+    cross_reference_file_c_anomalies(treasury_anomalies, file_c_data, discrepancies_file_c)
+  ),
+  tar_target(
+    treasury_plots,
+    save_treasury_plots(treasury_mts_data, treasury_anomalies_enriched),
+    format = "file"
+  ),
+
   # Calibration: Grant Witness ground truth
   tar_target(gw_nih_data, .rds_or("gw_nih_data", fetch_gw_nih)),
   # gw_nsf_data: fetch_gw_nsf() — available but not wired yet (no NSF calibration target)
@@ -183,6 +200,16 @@ list(
     calibration_plots,
     save_calibration_plots(calibration_features, calibration_results, freeze_classifier),
     format = "file"
+  ),
+
+  # Data quality gate — check agency submission freshness before interpreting drought
+  tar_target(
+    data_quality,
+    check_data_quality(
+      fiscal_year   = .current_fiscal_year(),
+      fiscal_period = .current_fiscal_period(),
+      agency_codes  = unname(AGENCY_TOPTIER_CODES)
+    )
   ),
 
   # CFDA program breakdown — which NSF/NIH programs are most affected (YoY)
@@ -234,5 +261,24 @@ list(
     .rds_or("award_obligations_flow", fetch_award_obligations_flow,
             agency_names = names(AGENCY_TOPTIER_CODES),
             fiscal_years = c(2024L, 2025L, 2026L))
+  ),
+
+  # Daily Treasury Statement — real-time withdrawal signal (1-business-day lag)
+  tar_target(dts_data, .rds_or("dts_data", fetch_dts_withdrawals, start_date = "2025-01-01")),
+
+  # Obligation drought detection — compares FY2026 pace to baseline
+  tar_target(obligation_drought, detect_obligation_drought(agency_obligations)),
+
+  # Pipeline gap — iceberg analysis vs. GW's tracked terminations
+  tar_target(pipeline_gap, compute_pipeline_gap(agency_obligations, gw_nih_data)),
+
+  # DTS anomaly — rolling 7-day YoY comparison
+  tar_target(dts_anomaly, detect_dts_anomaly(dts_data)),
+
+  # Obligation drought visualizations (5 plots: drought, gap, DTS x2, award flow)
+  tar_target(
+    obligation_plots,
+    save_obligation_plots(agency_obligations, pipeline_gap, dts_data, award_obligations_flow),
+    format = "file"
   )
 )

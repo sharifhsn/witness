@@ -46,6 +46,10 @@ suppressMessages({
   source(file.path(.root, "R/calibrate_freeze.R"))
   source(file.path(.root, "R/fetch_file_c.R"))
   source(file.path(.root, "R/fetch_usaspending_budget.R"))
+  source(file.path(.root, "R/fetch_treasury.R"))
+  source(file.path(.root, "R/detect_treasury_anomalies.R"))
+  source(file.path(.root, "R/fetch_dts.R"))
+  source(file.path(.root, "R/detect_obligation_drought.R"))
 })
 
 # ---------------------------------------------------------------------------
@@ -2160,4 +2164,325 @@ test_that("enrich_with_emergency_flags handles empty input gracefully", {
   result <- suppressMessages(enrich_with_emergency_flags(empty_disc))
   expect_equal(nrow(result), 0L)
   expect_true("flag_emergency_exempt" %in% names(result))
+})
+
+# ===========================================================================
+# Treasury MTS Fetcher (fetch_treasury.R)
+# ===========================================================================
+
+test_that("TREASURY_AGENCY_MAP covers HHS, NSF, and EPA", {
+  expect_true("Department of Health and Human Services" %in% names(TREASURY_AGENCY_MAP))
+  expect_true("National Science Foundation"             %in% names(TREASURY_AGENCY_MAP))
+  expect_true("Environmental Protection Agency"         %in% names(TREASURY_AGENCY_MAP))
+})
+
+test_that(".empty_mts_tibble has correct schema", {
+  tbl <- .empty_mts_tibble()
+  expect_s3_class(tbl, "tbl_df")
+  expect_equal(nrow(tbl), 0L)
+  expect_s3_class(tbl$record_date,                       "Date")
+  expect_type(tbl$classification_desc,                   "character")
+  expect_type(tbl$current_month_gross_outly_amt,         "double")
+  expect_type(tbl$record_fiscal_year,                    "integer")
+  expect_type(tbl$record_fiscal_month,                   "integer")
+})
+
+test_that(".parse_mts_records: well-formed records produce correct values", {
+  records <- list(
+    list(
+      record_date                    = "2025-03-31",
+      classification_desc            = "National Institutes of Health",
+      current_month_gross_outly_amt  = "3500",
+      current_fytd_gross_outly_amt   = "21000",
+      prior_fytd_gross_outly_amt     = "20000",
+      record_fiscal_year             = "2025",
+      record_fiscal_quarter          = "2",
+      record_fiscal_month            = "6"
+    )
+  )
+  result <- .parse_mts_records(records)
+  expect_equal(nrow(result), 1L)
+  expect_equal(result$current_month_gross_outly_amt, 3500)
+  expect_equal(result$record_fiscal_year, 2025L)
+})
+
+test_that(".parse_mts_records: string 'null' amounts produce NA", {
+  records <- list(
+    list(
+      record_date                   = "2025-02-28",
+      classification_desc           = "Total--National Science Foundation",
+      current_month_gross_outly_amt = "null",
+      current_fytd_gross_outly_amt  = "null",
+      prior_fytd_gross_outly_amt    = "null",
+      record_fiscal_year            = "2025",
+      record_fiscal_quarter         = "2",
+      record_fiscal_month           = "5"
+    )
+  )
+  result <- .parse_mts_records(records)
+  expect_true(is.na(result$current_month_gross_outly_amt))
+})
+
+test_that("TREASURY_MTS_URL contains fiscaldata.treasury.gov", {
+  expect_true(grepl("fiscaldata.treasury.gov", TREASURY_MTS_URL))
+})
+
+# ===========================================================================
+# Treasury Anomaly Detection (detect_treasury_anomalies.R)
+# ===========================================================================
+
+test_that("detect_spending_anomalies returns empty tibble for zero-row input", {
+  result <- detect_spending_anomalies(.empty_mts_tibble())
+  expect_s3_class(result, "tbl_df")
+  expect_equal(nrow(result), 0L)
+})
+
+test_that("detect_spending_anomalies flags large YoY drops", {
+  mts <- dplyr::tibble(
+    record_date    = as.Date(c("2024-03-31", "2025-03-31")),
+    agency         = c("National Science Foundation", "National Science Foundation"),
+    bureau         = c("NSF", "NSF"),
+    fiscal_year    = c(2024L, 2025L),
+    fiscal_month   = c(6L, 6L),
+    month_outlays  = c(1000, 100),   # -90% YoY
+    pct_change_yoy = c(NA_real_, -90),
+    pct_change_mom = c(NA_real_, NA_real_),
+    z_score        = c(NA_real_, -3.5)
+  )
+  result <- detect_spending_anomalies(mts)
+  expect_true(any(result$anomaly_flag, na.rm = TRUE))
+})
+
+test_that("cross_reference_anomalies returns empty tibble for empty inputs", {
+  empty_anomalies <- .empty_anomaly_tibble()
+  empty_discrepancies <- dplyr::tibble(
+    grant_number = character(0), discrepancy_type = character(0),
+    agency_name = character(0)
+  )
+  result <- cross_reference_anomalies(empty_anomalies, empty_discrepancies)
+  expect_s3_class(result, "tbl_df")
+  expect_equal(nrow(result), 0L)
+})
+
+# ===========================================================================
+# fetch_dts.R — Daily Treasury Statement fetcher
+# ===========================================================================
+
+test_that(".empty_dts_tibble has correct schema", {
+  tbl <- .empty_dts_tibble()
+  expect_s3_class(tbl, "tbl_df")
+  expect_equal(nrow(tbl), 0L)
+  expect_s3_class(tbl$record_date, "Date")
+  expect_type(tbl$agency,               "character")
+  expect_type(tbl$dts_category,         "character")
+  expect_type(tbl$today_withdrawals,    "double")
+  expect_type(tbl$mtd_withdrawals,      "double")
+  expect_type(tbl$fytd_withdrawals,     "double")
+  expect_type(tbl$record_fiscal_year,   "integer")
+  expect_type(tbl$record_calendar_month,"integer")
+  expect_type(tbl$record_calendar_year, "integer")
+})
+
+test_that(".parse_dts_records: well-formed records produce correct values", {
+  records <- list(list(
+    record_date           = "2025-03-01",
+    transaction_catg      = "HHS - National Institutes of Health",
+    transaction_today_amt = "150",
+    transaction_mtd_amt   = "1200",
+    transaction_fytd_amt  = "8500",
+    record_fiscal_year    = "2025",
+    record_calendar_month = "3",
+    record_calendar_year  = "2025"
+  ))
+  result <- .parse_dts_records(records)
+  expect_equal(nrow(result), 1L)
+  expect_equal(result$mtd_withdrawals,  1200)
+  expect_equal(result$fytd_withdrawals, 8500)
+  expect_equal(result$record_fiscal_year, 2025L)
+})
+
+test_that(".parse_dts_records: null amounts produce NA without error", {
+  records <- list(list(
+    record_date           = "2025-03-01",
+    transaction_catg      = "National Science Foundation (NSF)",
+    transaction_today_amt = "null",
+    transaction_mtd_amt   = NULL,
+    transaction_fytd_amt  = "null",
+    record_fiscal_year    = "2025",
+    record_calendar_month = "3",
+    record_calendar_year  = "2025"
+  ))
+  result <- expect_no_error(.parse_dts_records(records))
+  expect_true(is.na(result$today_withdrawals))
+})
+
+test_that(".parse_dts_records: empty input returns empty tibble with correct schema", {
+  result <- .parse_dts_records(list())
+  expect_s3_class(result, "tbl_df")
+  expect_equal(nrow(result), 0L)
+})
+
+test_that("DTS_AGENCY_CATS includes NIH, NSF, EPA, CDC", {
+  cats <- names(DTS_AGENCY_CATS)
+  expect_true(any(grepl("Institutes of Health", cats)))
+  expect_true(any(grepl("Science Foundation",   cats)))
+  expect_true(any(grepl("Environmental Protection", cats)))
+  expect_true(any(grepl("Centers for Disease", cats)))
+})
+
+test_that("fetch_dts_withdrawals with empty agency_cats returns empty tibble", {
+  result <- fetch_dts_withdrawals(start_date = "2025-01-01", agency_cats = character(0))
+  expect_s3_class(result, "tbl_df")
+  expect_equal(nrow(result), 0L)
+})
+
+test_that("DTS_URL contains fiscaldata.treasury.gov", {
+  expect_true(grepl("fiscaldata.treasury.gov", DTS_URL))
+})
+
+# ===========================================================================
+# detect_obligation_drought.R — drought detection + pipeline gap
+# ===========================================================================
+
+test_that("detect_obligation_drought fires drought flag when FY2026 < 50% of baseline", {
+  oblig <- dplyr::tibble(
+    agency                 = "National Science Foundation",
+    fiscal_year            = c(2024L, 2025L, 2026L),
+    fiscal_period          = rep(4L, 3L),
+    obligations_cumulative = c(1000, 1100, 400),
+    budgetary_resources    = rep(2000, 3L),
+    total_obligated_yr     = rep(NA_real_, 3L),
+    total_outlayed_yr      = rep(NA_real_, 3L),
+    obligation_rate        = rep(NA_real_, 3L)
+  )
+  result <- detect_obligation_drought(oblig, baseline_fiscal_years = c(2024L, 2025L))
+  expect_true(any(result$drought_flag, na.rm = TRUE))
+})
+
+test_that("detect_obligation_drought does NOT fire when FY2026 >= 50% of baseline", {
+  oblig <- dplyr::tibble(
+    agency                 = "National Science Foundation",
+    fiscal_year            = c(2024L, 2025L, 2026L),
+    fiscal_period          = rep(4L, 3L),
+    obligations_cumulative = c(1000, 1100, 600),
+    budgetary_resources    = rep(2000, 3L),
+    total_obligated_yr     = rep(NA_real_, 3L),
+    total_outlayed_yr      = rep(NA_real_, 3L),
+    obligation_rate        = rep(NA_real_, 3L)
+  )
+  result <- detect_obligation_drought(oblig, baseline_fiscal_years = c(2024L, 2025L))
+  expect_false(any(result$drought_flag, na.rm = TRUE))
+})
+
+test_that("detect_obligation_drought returns empty tibble for zero-row input", {
+  result <- detect_obligation_drought(.empty_obligations_tibble())
+  expect_s3_class(result, "tbl_df")
+  expect_equal(nrow(result), 0L)
+})
+
+test_that("detect_obligation_drought output has required columns", {
+  oblig <- dplyr::tibble(
+    agency = "NSF", fiscal_year = c(2024L, 2026L), fiscal_period = rep(4L, 2L),
+    obligations_cumulative = c(1000, 400), budgetary_resources = rep(2000, 2L),
+    total_obligated_yr = rep(NA_real_, 2L), total_outlayed_yr = rep(NA_real_, 2L),
+    obligation_rate = rep(NA_real_, 2L)
+  )
+  result <- detect_obligation_drought(oblig, baseline_fiscal_years = 2024L)
+  expect_true(all(c("agency","fiscal_period","fy2026_obligations",
+                     "drought_severity","drought_flag") %in% names(result)))
+})
+
+test_that("compute_pipeline_gap: shortfall = FY2025 - FY2026 at matching period", {
+  oblig <- dplyr::tibble(
+    agency = "National Science Foundation",
+    fiscal_year = c(2025L, 2026L), fiscal_period = c(4L, 4L),
+    obligations_cumulative = c(1000, 600), budgetary_resources = rep(2000, 2L),
+    total_obligated_yr = rep(NA_real_, 2L), total_outlayed_yr = rep(NA_real_, 2L),
+    obligation_rate = rep(NA_real_, 2L)
+  )
+  result <- compute_pipeline_gap(oblig, gw_terminated_data = NULL)
+  nsf_row <- result[result$agency == "National Science Foundation", ]
+  expect_equal(nsf_row$obligation_shortfall, 400, tolerance = 1e-6)
+})
+
+test_that("compute_pipeline_gap returns NA pipeline_gap when gw_terminated_data is NULL", {
+  oblig <- dplyr::tibble(
+    agency = "National Science Foundation",
+    fiscal_year = c(2025L, 2026L), fiscal_period = c(4L, 4L),
+    obligations_cumulative = c(1000, 600), budgetary_resources = rep(2000, 2L),
+    total_obligated_yr = rep(NA_real_, 2L), total_outlayed_yr = rep(NA_real_, 2L),
+    obligation_rate = rep(NA_real_, 2L)
+  )
+  result <- compute_pipeline_gap(oblig, gw_terminated_data = NULL)
+  expect_true(all(is.na(result$pipeline_gap_estimate)))
+})
+
+test_that("compute_pipeline_gap output has required columns", {
+  oblig <- dplyr::tibble(
+    agency = "NSF", fiscal_year = c(2025L, 2026L), fiscal_period = c(4L, 4L),
+    obligations_cumulative = c(1000, 600), budgetary_resources = rep(2000, 2L),
+    total_obligated_yr = rep(NA_real_, 2L), total_outlayed_yr = rep(NA_real_, 2L),
+    obligation_rate = rep(NA_real_, 2L)
+  )
+  result <- compute_pipeline_gap(oblig)
+  expect_true(all(c("agency","comparison_period","obligation_shortfall",
+                     "pipeline_gap_estimate") %in% names(result)))
+})
+
+test_that("detect_dts_anomaly returns empty tibble for zero-row input", {
+  result <- detect_dts_anomaly(.empty_dts_tibble())
+  expect_s3_class(result, "tbl_df")
+  expect_equal(nrow(result), 0L)
+  expect_true("dts_anomaly_flag" %in% names(result))
+})
+
+test_that("detect_dts_anomaly: dts_anomaly_flag TRUE when YoY ratio < 0.60", {
+  # Two years of daily data, FY2026 at ~30% of FY2025
+  dates_2025 <- seq(as.Date("2025-01-01"), as.Date("2025-01-31"), by = "day")
+  dates_2026 <- seq(as.Date("2026-01-01"), as.Date("2026-01-31"), by = "day")
+  n25 <- length(dates_2025); n26 <- length(dates_2026)
+  dts <- dplyr::tibble(
+    record_date           = c(dates_2025, dates_2026),
+    agency                = "National Institutes of Health",
+    dts_category          = "HHS - National Institutes of Health",
+    today_withdrawals     = rep(0, n25 + n26),
+    mtd_withdrawals       = c(seq(100, by = 100, length.out = n25),
+                               seq(30,  by = 30,  length.out = n26)),
+    fytd_withdrawals      = c(seq(100, by = 100, length.out = n25),
+                               seq(30,  by = 30,  length.out = n26)),
+    record_fiscal_year    = c(rep(2025L, n25), rep(2026L, n26)),
+    record_calendar_month = c(rep(1L, n25), rep(1L, n26)),
+    record_calendar_year  = c(rep(2025L, n25), rep(2026L, n26))
+  )
+  result <- detect_dts_anomaly(dts)
+  flagged <- result[result$dts_anomaly_flag & result$record_date >= as.Date("2026-01-08"), ]
+  expect_gt(nrow(flagged), 0L)
+})
+
+# ===========================================================================
+# check_data_quality() (validate.R — macro branch only)
+# ===========================================================================
+
+test_that(".empty_data_quality_tibble has correct schema", {
+  tbl <- .empty_data_quality_tibble()
+  expect_s3_class(tbl, "tbl_df")
+  expect_equal(nrow(tbl), 0L)
+  expect_type(tbl$agency_name,                       "character")
+  expect_type(tbl$toptier_code,                      "character")
+  expect_s3_class(tbl$recent_publication_date,       "Date")
+  expect_type(tbl$recent_publication_date_certified, "logical")
+  expect_type(tbl$days_since_publication,            "integer")
+  expect_type(tbl$data_quality_flag,                 "logical")
+})
+
+test_that(".current_fiscal_year uses October-start fiscal year convention", {
+  fy <- .current_fiscal_year()
+  cy <- as.integer(format(Sys.Date(), "%Y"))
+  expect_true(fy == cy || fy == cy + 1L)
+})
+
+test_that(".current_fiscal_period returns value in valid range", {
+  fp <- .current_fiscal_period()
+  expect_gte(fp, 2L)
+  expect_lte(fp, 11L)
 })
