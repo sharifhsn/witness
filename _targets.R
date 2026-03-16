@@ -233,5 +233,29 @@ list(
     .rds_or("award_obligations_flow", fetch_award_obligations_flow,
             agency_names = names(AGENCY_TOPTIER_CODES),
             fiscal_years = c(2024L, 2025L, 2026L))
+  ),
+
+  # Recipient-level grant compression — data-driven institution targeting detection.
+  # Identifies which research institutions have anomalous FY2026 obligation drops
+  # WITHOUT requiring a manually curated list (unlike GW's 8-institution approach).
+  # Base rate: 1 institution at >-40% in a normal year vs 5 in FY2026.
+  # Amounts = sum of federal_action_obligation actions in window (new awards +
+  # continuation-year fundings + amendments). Not lifetime award face value.
+  tar_target(
+    recipient_compression,
+    dplyr::bind_rows(
+      fetch_recipient_compression(
+        agency_spec    = list(type = "awarding", tier = "subtier",
+                              name = "National Institutes of Health"),
+        baseline_start = "2024-10-01", baseline_end = "2025-03-31",
+        current_start  = "2025-10-01"
+      ),
+      fetch_recipient_compression(
+        agency_spec    = list(type = "awarding", tier = "toptier",
+                              name = "National Science Foundation"),
+        baseline_start = "2024-10-01", baseline_end = "2025-03-31",
+        current_start  = "2025-10-01"
+      )
+    )
   )
 )

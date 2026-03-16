@@ -528,3 +528,240 @@ fetch_geographic_breakdown <- function(
     limit       = limit
   )
 }
+
+# --------------------------------------------------------------------------- #
+# Recipient-level grant compression — institution-level targeting detection
+# --------------------------------------------------------------------------- #
+#
+# Compares two same-length date windows using spending_by_category/recipient_duns/
+# to surface institutions with anomalous YoY obligation drops.
+#
+# WHAT "amount" MEANS: sum of federal_action_obligation for matching grants with
+# action_date in the window. This includes both new competing awards AND
+# continuation-year fundings AND amendments. It is NOT lifetime face value.
+# A drop can reflect: (a) fewer new awards issued, (b) terminated grants
+# losing continuation actions, or (c) large one-time awards not renewing.
+# All three are meaningful signals. Label the output as "obligation actions"
+# not "new grants" to avoid overclaiming.
+#
+# METHODOLOGICAL LIMITATIONS (adversarially reviewed):
+# 1. Institutions that drop below the top-N threshold appear as below_cutoff=TRUE,
+#    not as zero. Do not treat below_cutoff as zero — the institution may still
+#    have $10-30M in the current period.
+# 2. The join uses recipient_id (UUID) as the primary key, falling back to
+#    normalized name. DUNS numbers are deprecated since Apr 2022.
+# 3. Base rate: -40%+ drops in a normal year are uncommon but not impossible
+#    for a single large program project grant cycling out. Interpret in context.
+
+#' Fetch institution-level grant obligation compression (YoY)
+#'
+#' Queries `spending_by_category/recipient_duns/` for two same-length date
+#' windows (baseline and current), joins on `recipient_id` (UUID, stable across
+#' periods), and returns YoY obligation compression per institution.
+#'
+#' This reveals which specific research institutions have the most anomalous
+#' spending drops — identifying targeting patterns from data rather than from
+#' manually curated institutional lists.
+#'
+#' @section Amount semantics:
+#'   `baseline_M` / `current_M` = millions of dollars in `federal_action_obligation`
+#'   actions (new awards + continuation-year fundings + amendments) with
+#'   `action_date` in the respective window. Not lifetime award face value.
+#'
+#' @section below_cutoff:
+#'   When `below_cutoff = TRUE`, the institution was in the baseline top-N but
+#'   not the current top-N. Its current spending is somewhere between $0 and
+#'   `cutoff_floor_M` (the minimum amount in the current top-N list). Do not
+#'   treat as $0.
+#'
+#' @param agency_spec List with USAspending agency filter. Required fields:
+#'   `type`, `tier`, `name`. Optionally `toptier_name` for subtier queries.
+#' @param baseline_start,baseline_end ISO date strings for the baseline window.
+#' @param current_start Character. Start of current window.
+#' @param current_end Character. End of current window. Default today.
+#' @param award_type_codes Character vector. Default `GRANT_AWARD_TYPE_CODES`.
+#' @param n_recipients Integer. Recipients fetched per period. Default 100L.
+#'   Higher values reduce false below_cutoff flags at the cost of API response time.
+#' @return Tibble with columns: recipient_name (chr), recipient_id (chr),
+#'   baseline_M (dbl), current_M (dbl, NA if below_cutoff), yoy_pct (dbl),
+#'   drop_M (dbl), below_cutoff (lgl), cutoff_floor_M (dbl),
+#'   join_method (chr: "recipient_id" | "name").
+#' @export
+fetch_recipient_compression <- function(
+  agency_spec,
+  baseline_start,
+  baseline_end,
+  current_start,
+  current_end      = format(Sys.Date(), "%Y-%m-%d"),
+  award_type_codes = GRANT_AWARD_TYPE_CODES,
+  n_recipients     = 100L
+) {
+  agency_label <- agency_spec[["name"]] %||% "Unknown"
+  log_event(sprintf(
+    "fetch_recipient_compression: %s, baseline %s–%s, current %s–%s, n=%d",
+    agency_label, baseline_start, baseline_end, current_start, current_end, n_recipients
+  ))
+
+  baseline <- .fetch_recipient_top_n(
+    agency_spec, baseline_start, baseline_end,
+    award_type_codes, n_recipients, label = sprintf("%s baseline", agency_label)
+  )
+  current <- .fetch_recipient_top_n(
+    agency_spec, current_start, current_end,
+    award_type_codes, n_recipients, label = sprintf("%s current", agency_label)
+  )
+
+  if (nrow(baseline) == 0L) {
+    log_event("fetch_recipient_compression: empty baseline — cannot compute YoY", "WARN")
+    return(.empty_compression_tibble())
+  }
+
+  # Cutoff floor: minimum obligation amount in current top-N
+  # Institutions below this threshold will be flagged below_cutoff
+  cutoff_floor_M <- if (nrow(current) > 0L) min(current$amount_M, na.rm = TRUE) else 0
+
+  # --- Join: primary on recipient_id (UUID), fallback on normalized name ---
+
+  # Attempt 1: inner-join on recipient_id where both sides have non-NA id
+  base_with_id    <- baseline[!is.na(baseline$recipient_id), ]
+  current_with_id <- current[!is.na(current$recipient_id), ]
+
+  id_matched <- dplyr::inner_join(
+    base_with_id   |> dplyr::rename(baseline_M = amount_M),
+    current_with_id |> dplyr::select(recipient_id, current_M = amount_M),
+    by = "recipient_id"
+  ) |> dplyr::mutate(join_method = "recipient_id")
+
+  # Unmatched baseline rows (recipient_id absent or not found in current)
+  unmatched_base <- baseline[
+    !baseline$recipient_id %in% id_matched$recipient_id | is.na(baseline$recipient_id),
+  ]
+
+  # Attempt 2: name-normalized join for remaining
+  normalize_name <- function(x) {
+    toupper(trimws(gsub("[,.'\\-]", " ", gsub("\\s+", " ", x))))
+  }
+  unmatched_base$name_key <- normalize_name(unmatched_base$recipient_name)
+  current_norm <- current |>
+    dplyr::filter(!recipient_id %in% id_matched$recipient_id | is.na(recipient_id)) |>
+    dplyr::mutate(name_key = normalize_name(recipient_name)) |>
+    dplyr::select(name_key, current_M = amount_M, recipient_id)
+
+  name_matched <- dplyr::inner_join(
+    unmatched_base |> dplyr::rename(baseline_M = amount_M) |>
+      dplyr::select(-name_key, name_key),
+    current_norm |> dplyr::select(name_key, current_M),
+    by = "name_key"
+  ) |>
+    dplyr::select(-name_key) |>
+    dplyr::mutate(join_method = "name")
+
+  # Remaining: in baseline top-N but not in current top-N (below_cutoff)
+  matched_ids <- c(id_matched$recipient_id, name_matched$recipient_id)
+  unmatched_final <- baseline[
+    !baseline$recipient_id %in% matched_ids &
+      !normalize_name(baseline$recipient_name) %in%
+        normalize_name(name_matched$recipient_name),
+  ] |>
+    dplyr::rename(baseline_M = amount_M) |>
+    dplyr::mutate(current_M = NA_real_, join_method = "none")
+
+  combined <- dplyr::bind_rows(id_matched, name_matched, unmatched_final)
+
+  result <- combined |>
+    dplyr::mutate(
+      below_cutoff   = is.na(current_M),
+      current_M      = dplyr::if_else(below_cutoff, NA_real_, current_M),
+      yoy_pct        = dplyr::if_else(
+        below_cutoff | is.na(baseline_M) | baseline_M == 0,
+        NA_real_,
+        round((current_M - baseline_M) / baseline_M * 100, 1)
+      ),
+      drop_M         = dplyr::if_else(below_cutoff, NA_real_,
+                                      round(baseline_M - current_M, 2)),
+      cutoff_floor_M = cutoff_floor_M
+    ) |>
+    dplyr::arrange(dplyr::coalesce(yoy_pct, -Inf)) |>
+    dplyr::select(
+      recipient_name, recipient_id, baseline_M, current_M,
+      yoy_pct, drop_M, below_cutoff, cutoff_floor_M, join_method
+    )
+
+  n_below   <- sum(result$below_cutoff, na.rm = TRUE)
+  n_severe  <- sum(!is.na(result$yoy_pct) & result$yoy_pct < -40, na.rm = TRUE)
+  log_event(sprintf(
+    "fetch_recipient_compression: %d institutions, %d below cutoff (floor $%.1fM), %d with >40%% drop",
+    nrow(result), n_below, cutoff_floor_M, n_severe
+  ))
+
+  result
+}
+
+# --------------------------------------------------------------------------- #
+# Internal helpers for recipient compression
+# --------------------------------------------------------------------------- #
+
+#' Fetch top-N recipients by obligation amount for a date window.
+#' Returns recipient_id (UUID), recipient_name, amount_M.
+#' @keywords internal
+.fetch_recipient_top_n <- function(agency_spec, start_date, end_date,
+                                   award_type_codes, n_recipients, label) {
+  body <- list(
+    filters = list(
+      award_type_codes = as.list(award_type_codes),
+      agencies         = list(agency_spec),
+      time_period      = list(list(start_date = start_date, end_date = end_date))
+    ),
+    limit = as.integer(n_recipients),
+    page  = 1L
+  )
+  url <- paste0(SPENDING_BY_CATEGORY_BASE, "/recipient_duns/")
+  raw <- .spending_over_time_post(body, url = url,
+                                  label = sprintf("recipient_duns %s", label))
+  if (is.null(raw)) return(.empty_recipient_top_n())
+
+  results <- raw[["results"]] %||% list()
+  if (length(results) == 0L) return(.empty_recipient_top_n())
+
+  n          <- length(results)
+  ids_vec    <- character(n)
+  names_vec  <- character(n)
+  amount_vec <- double(n)
+
+  for (i in seq_len(n)) {
+    r            <- results[[i]]
+    ids_vec[i]   <- as.character(r[["recipient_id"]] %||% NA_character_)
+    names_vec[i] <- as.character(r[["name"]]         %||% NA_character_)
+    amount_vec[i] <- .safe_as_numeric(r[["amount"]]) / 1e6
+  }
+
+  dplyr::tibble(
+    recipient_id   = ids_vec,
+    recipient_name = names_vec,
+    amount_M       = amount_vec
+  )
+}
+
+#' @keywords internal
+.empty_recipient_top_n <- function() {
+  dplyr::tibble(
+    recipient_id   = character(0),
+    recipient_name = character(0),
+    amount_M       = double(0)
+  )
+}
+
+#' @keywords internal
+.empty_compression_tibble <- function() {
+  dplyr::tibble(
+    recipient_name = character(0),
+    recipient_id   = character(0),
+    baseline_M     = double(0),
+    current_M      = double(0),
+    yoy_pct        = double(0),
+    drop_M         = double(0),
+    below_cutoff   = logical(0),
+    cutoff_floor_M = double(0),
+    join_method    = character(0)
+  )
+}

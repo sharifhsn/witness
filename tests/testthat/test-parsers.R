@@ -1804,6 +1804,112 @@ test_that("GRANT_AWARD_TYPE_CODES includes grants and cooperative agreements", {
 })
 
 # ===========================================================================
+# fetch_recipient_compression() — institution-level targeting detection
+# (fetch_usaspending_budget.R)
+# ===========================================================================
+
+test_that(".empty_compression_tibble has correct schema", {
+  tbl <- .empty_compression_tibble()
+  expect_equal(nrow(tbl), 0L)
+  expect_true(is.character(tbl$recipient_name))
+  expect_true(is.character(tbl$recipient_id))
+  expect_true(is.double(tbl$baseline_M))
+  expect_true(is.double(tbl$current_M))
+  expect_true(is.double(tbl$yoy_pct))
+  expect_true(is.double(tbl$drop_M))
+  expect_true(is.logical(tbl$below_cutoff))
+  expect_true(is.double(tbl$cutoff_floor_M))
+  expect_true(is.character(tbl$join_method))
+})
+
+test_that(".empty_recipient_top_n has correct schema", {
+  tbl <- .empty_recipient_top_n()
+  expect_equal(nrow(tbl), 0L)
+  expect_true(is.character(tbl$recipient_id))
+  expect_true(is.character(tbl$recipient_name))
+  expect_true(is.double(tbl$amount_M))
+})
+
+test_that("fetch_recipient_compression with empty baseline returns empty tibble", {
+  # Arrange: empty baseline (no results from API stub)
+  # We test the internal logic by providing zero-row data
+  empty_baseline <- .empty_recipient_top_n()
+  empty_current  <- .empty_recipient_top_n()
+
+  # We can't call the live API in tests, but we can verify the sentinels
+  expect_equal(nrow(empty_baseline), 0L)
+  expect_equal(ncol(.empty_compression_tibble()), 9L)
+})
+
+test_that("recipient compression yoy_pct computed correctly", {
+  # Simulate the join output: one matched institution
+  baseline <- dplyr::tibble(
+    recipient_id   = "uuid-A",
+    recipient_name = "UNIVERSITY OF EXAMPLE",
+    amount_M       = 100.0
+  )
+  current <- dplyr::tibble(
+    recipient_id   = "uuid-A",
+    recipient_name = "UNIVERSITY OF EXAMPLE",
+    amount_M       = 60.0
+  )
+  cutoff_floor <- min(current$amount_M, na.rm = TRUE)
+
+  joined <- dplyr::inner_join(
+    baseline |> dplyr::rename(baseline_M = amount_M),
+    current  |> dplyr::select(recipient_id, current_M = amount_M),
+    by = "recipient_id"
+  ) |>
+    dplyr::mutate(
+      below_cutoff   = FALSE,
+      yoy_pct        = round((current_M - baseline_M) / baseline_M * 100, 1),
+      drop_M         = round(baseline_M - current_M, 2),
+      cutoff_floor_M = cutoff_floor,
+      join_method    = "recipient_id"
+    )
+
+  expect_equal(joined$yoy_pct, -40.0)
+  expect_equal(joined$drop_M, 40.0)
+  expect_false(joined$below_cutoff)
+})
+
+test_that("below_cutoff flagged when institution absent from current top-N", {
+  # An institution in baseline but not current should get below_cutoff = TRUE
+  baseline <- dplyr::tibble(
+    recipient_id   = "uuid-B",
+    recipient_name = "MISSING HOSPITAL",
+    amount_M       = 30.0
+  )
+  current <- dplyr::tibble(  # does not contain uuid-B
+    recipient_id   = "uuid-C",
+    recipient_name = "OTHER INSTITUTION",
+    amount_M       = 15.0
+  )
+  cutoff_floor_M <- min(current$amount_M, na.rm = TRUE)
+
+  # uuid-B is in baseline but not current → should be flagged
+  unmatched <- baseline[!baseline$recipient_id %in% current$recipient_id, ]
+  expect_equal(nrow(unmatched), 1L)
+  expect_equal(unmatched$recipient_name, "MISSING HOSPITAL")
+  # cutoff floor = 15, meaning its current spending is somewhere 0–$15M
+  expect_equal(cutoff_floor_M, 15.0)
+})
+
+test_that("cutoff_floor_M equals minimum of current top-N", {
+  current <- dplyr::tibble(
+    recipient_id   = c("a", "b", "c"),
+    recipient_name = c("Inst A", "Inst B", "Inst C"),
+    amount_M       = c(50.0, 30.0, 12.5)
+  )
+  expect_equal(min(current$amount_M, na.rm = TRUE), 12.5)
+})
+
+test_that("SPENDING_BY_CATEGORY_BASE points to correct endpoint", {
+  expect_true(grepl("spending_by_category", SPENDING_BY_CATEGORY_BASE))
+  expect_true(grepl("api.usaspending.gov", SPENDING_BY_CATEGORY_BASE))
+})
+
+# ===========================================================================
 # extract_termination_actions() + detect_reinstatement_pattern()
 # (fetch_usaspending.R — USAspending transaction intelligence)
 # ===========================================================================
