@@ -31,6 +31,7 @@ theme_gw <- function() {
 GW_DISCREPANCY_COLORS <- c(
   "active_despite_terminated" = "#e38958",
   "possible_freeze"           = "#a4388a",
+  "possible_freeze_no_data"   = "#c979b0",
   "untracked"                 = "#570da0",
   "normal"                    = "#cccccc"
 )
@@ -87,6 +88,7 @@ plot_discrepancy_summary <- function(summary_df) {
       discrepancy_label = dplyr::case_when(
         discrepancy_type == "active_despite_terminated" ~ "Active Despite Terminated",
         discrepancy_type == "possible_freeze"           ~ "Possible Freeze",
+        discrepancy_type == "possible_freeze_no_data"   ~ "Possible Freeze (No Data)",
         discrepancy_type == "untracked"                 ~ "Untracked",
         TRUE                                            ~ discrepancy_type
       )
@@ -100,6 +102,7 @@ plot_discrepancy_summary <- function(summary_df) {
     ggplot2::scale_fill_manual(values = c(
       "Active Despite Terminated" = "#e38958",
       "Possible Freeze"           = "#a4388a",
+      "Possible Freeze (No Data)" = "#c979b0",
       "Untracked"                 = "#570da0"
     ), name = "Discrepancy Type") +
     ggplot2::scale_x_continuous(labels = scales::label_dollar(scale_cut = scales::cut_short_scale())) +
@@ -128,6 +131,7 @@ plot_outlay_scatter <- function(discrepancies) {
       discrepancy_label = dplyr::case_when(
         discrepancy_type == "active_despite_terminated" ~ "Active Despite Terminated",
         discrepancy_type == "possible_freeze"           ~ "Possible Freeze",
+        discrepancy_type == "possible_freeze_no_data"   ~ "Possible Freeze (No Data)",
         discrepancy_type == "untracked"                 ~ "Untracked",
         TRUE                                            ~ "Normal"
       )
@@ -138,10 +142,13 @@ plot_outlay_scatter <- function(discrepancies) {
     ggplot2::aes(x = award_amount, y = outlay_ratio, color = discrepancy_label)
   ) +
     ggplot2::geom_point(alpha = 0.6, size = 2) +
-    ggplot2::scale_color_manual(values = GW_DISCREPANCY_COLORS |>
-      stats::setNames(c("Active Despite Terminated", "Possible Freeze", "Untracked", "Normal")),
-      name = "Discrepancy Type"
-    ) +
+    ggplot2::scale_color_manual(values = c(
+      "Active Despite Terminated" = "#e38958",
+      "Possible Freeze"           = "#a4388a",
+      "Possible Freeze (No Data)" = "#c979b0",
+      "Untracked"                 = "#570da0",
+      "Normal"                    = "#cccccc"
+    ), name = "Discrepancy Type") +
     ggplot2::scale_x_continuous(labels = scales::label_dollar(scale_cut = scales::cut_short_scale())) +
     ggplot2::scale_y_continuous(labels = scales::label_percent()) +
     ggplot2::geom_hline(yintercept = 0.10, linetype = "dashed", color = "grey50", linewidth = 0.5) +
@@ -220,7 +227,7 @@ plot_state_map <- function(notices) {
 plot_freeze_severity <- function(discrepancies) {
   plot_data <- discrepancies |>
     dplyr::filter(
-      discrepancy_type == "possible_freeze",
+      discrepancy_type %in% c("possible_freeze", "possible_freeze_no_data"),
       !is.na(elapsed_ratio),
       !is.na(outlay_ratio),
       !is.na(award_amount)

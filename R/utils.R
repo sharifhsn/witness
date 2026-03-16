@@ -54,6 +54,47 @@ log_event <- function(msg, level = "INFO") {
 #' @export
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
+#' Vectorised ratio with protection against division by zero and NA inputs
+#'
+#' @param numerator Numeric vector.
+#' @param denominator Numeric vector.
+#' @return Numeric vector. NA where denominator is 0 or NA.
+#' @keywords internal
+.safe_ratio <- function(numerator, denominator) {
+  dplyr::if_else(
+    !is.na(denominator) & denominator > 0,
+    as.numeric(numerator) / denominator,
+    NA_real_
+  )
+}
+
+#' Cache-aware fetch wrapper
+#'
+#' Reads `data/raw/{name}.rds` when present; otherwise calls `fetch_fn(...)`
+#' and saves the result there before returning it. Keeps API calls out of
+#' repeated `tar_make()` runs caused by code changes — the cache is only
+#' bypassed when the file is manually deleted or `--force` is passed to
+#' `scripts/fetch_data.R`.
+#'
+#' @param name Character. Cache file stem (no path, no extension).
+#' @param fetch_fn Function. Called with `...` when the cache is cold.
+#' @param ... Additional arguments forwarded to `fetch_fn`.
+#' @return The tibble returned by `fetch_fn`, or the cached copy.
+#' @keywords internal
+.rds_or <- function(name, fetch_fn, ...) {
+  path <- file.path("data", "raw", paste0(name, ".rds"))
+  if (file.exists(path)) {
+    log_event(sprintf("%s: cache hit — loading %s", name, path))
+    return(readRDS(path))
+  }
+  log_event(sprintf("%s: cache miss — fetching from API", name))
+  result <- fetch_fn(...)
+  dir.create(dirname(path), showWarnings = FALSE, recursive = TRUE)
+  saveRDS(result, path)
+  log_event(sprintf("%s: saved %d rows to %s", name, nrow(result), path))
+  result
+}
+
 #' Log data quality summary for a tibble
 #'
 #' Reports row count, NA rates, and any flag columns to the log.
@@ -86,4 +127,11 @@ log_quality_summary <- function(df, label) {
   }
 
   invisible(df)
+}
+
+#' Convert any numeric-like value from JSON (including string "null") to double.
+#' @keywords internal
+.safe_as_numeric <- function(x) {
+  if (is.null(x) || identical(x, "null")) return(NA_real_)
+  as.numeric(x)
 }

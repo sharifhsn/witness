@@ -22,8 +22,22 @@ Thumbs.db
 *.parquet
 *.csv
 
+# Raw data cache (populated by scripts/fetch_data.R or tar_make via .rds_or())
+data/raw/
+
 # Quarto render artifacts
 _site/
 .quarto/
 dashboard.html
 dashboard_files/
+
+# Research/reconnaissance artifacts (committed on feature/macro-signals only)
+airtable_docs/
+analysis/
+grant_witness_docs/
+scripts/
+ENDPOINT_RECOMMENDATIONS.md
+GW_CAPABILITY_GAPS.md
+RECONNAISSANCE_INDEX.md
+USASPENDING_API_RECONNAISSANCE.md
+USASPENDING_QUICK_REFERENCE.md

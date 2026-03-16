@@ -42,6 +42,10 @@ suppressMessages({
   source(file.path(.root, "R/scrape_nsf.R"))
   source(file.path(.root, "R/transform.R"))
   source(file.path(.root, "R/fetch_usaspending.R"))
+  source(file.path(.root, "R/fetch_gw.R"))
+  source(file.path(.root, "R/calibrate_freeze.R"))
+  source(file.path(.root, "R/fetch_file_c.R"))
+  source(file.path(.root, "R/fetch_usaspending_budget.R"))
 })
 
 # ---------------------------------------------------------------------------
@@ -496,11 +500,13 @@ test_that(".normalise_awards: org_name is NA when neither org_name nor recipient
 
 test_that("classify_discrepancy: vectorized over multiple rows", {
   result <- classify_discrepancy(
-    flag_active_despite_terminated = c(TRUE, FALSE, FALSE, FALSE),
-    flag_no_recent_activity        = c(FALSE, TRUE, FALSE, FALSE),
-    flag_not_in_gw                 = c(FALSE, FALSE, TRUE, FALSE)
+    flag_active_despite_terminated = c(TRUE, FALSE, FALSE, FALSE, FALSE),
+    flag_no_recent_activity        = c(FALSE, TRUE, TRUE, FALSE, FALSE),
+    flag_missing_outlay_data       = c(FALSE, FALSE, TRUE, FALSE, FALSE),
+    flag_not_in_gw                 = c(FALSE, FALSE, FALSE, TRUE, FALSE)
   )
-  expect_equal(result, c("active_despite_terminated", "possible_freeze", "untracked", "normal"))
+  expect_equal(result, c("active_despite_terminated", "possible_freeze",
+                          "possible_freeze_no_data", "untracked", "normal"))
 })
 
 # ===========================================================================
@@ -511,10 +517,26 @@ test_that("classify_discrepancy: vectorized over multiple rows", {
 # classify_discrepancy()
 # ---------------------------------------------------------------------------
 
+# Convenience wrapper with default-FALSE flags so tests only set what they care about.
+.cd <- function(flag_active_despite_terminated = FALSE,
+                flag_no_recent_activity        = FALSE,
+                flag_missing_outlay_data       = FALSE,
+                flag_not_in_gw                 = FALSE,
+                sub_agency                     = NA_character_) {
+  classify_discrepancy(
+    flag_active_despite_terminated,
+    flag_no_recent_activity,
+    flag_missing_outlay_data,
+    flag_not_in_gw,
+    sub_agency = sub_agency
+  )
+}
+
 test_that("classify_discrepancy: active_despite_terminated when first flag TRUE", {
   result <- classify_discrepancy(
     flag_active_despite_terminated = TRUE,
     flag_no_recent_activity        = FALSE,
+    flag_missing_outlay_data       = FALSE,
     flag_not_in_gw                 = FALSE
   )
   expect_equal(result, "active_despite_terminated")
@@ -524,6 +546,7 @@ test_that("classify_discrepancy: active_despite_terminated wins over possible_fr
   result <- classify_discrepancy(
     flag_active_despite_terminated = TRUE,
     flag_no_recent_activity        = TRUE,
+    flag_missing_outlay_data       = FALSE,
     flag_not_in_gw                 = FALSE
   )
   expect_equal(result, "active_despite_terminated")
@@ -533,24 +556,37 @@ test_that("classify_discrepancy: active_despite_terminated wins over all other f
   result <- classify_discrepancy(
     flag_active_despite_terminated = TRUE,
     flag_no_recent_activity        = TRUE,
+    flag_missing_outlay_data       = TRUE,
     flag_not_in_gw                 = TRUE
   )
   expect_equal(result, "active_despite_terminated")
 })
 
-test_that("classify_discrepancy: possible_freeze when only no_recent_activity is TRUE", {
+test_that("classify_discrepancy: possible_freeze when no_recent_activity TRUE and has outlay data", {
   result <- classify_discrepancy(
     flag_active_despite_terminated = FALSE,
     flag_no_recent_activity        = TRUE,
+    flag_missing_outlay_data       = FALSE,
     flag_not_in_gw                 = FALSE
   )
   expect_equal(result, "possible_freeze")
+})
+
+test_that("classify_discrepancy: possible_freeze_no_data when no_recent_activity TRUE and missing outlay data", {
+  result <- classify_discrepancy(
+    flag_active_despite_terminated = FALSE,
+    flag_no_recent_activity        = TRUE,
+    flag_missing_outlay_data       = TRUE,
+    flag_not_in_gw                 = FALSE
+  )
+  expect_equal(result, "possible_freeze_no_data")
 })
 
 test_that("classify_discrepancy: possible_freeze wins over untracked", {
   result <- classify_discrepancy(
     flag_active_despite_terminated = FALSE,
     flag_no_recent_activity        = TRUE,
+    flag_missing_outlay_data       = FALSE,
     flag_not_in_gw                 = TRUE
   )
   expect_equal(result, "possible_freeze")
@@ -560,6 +596,7 @@ test_that("classify_discrepancy: untracked when only not_in_gw is TRUE", {
   result <- classify_discrepancy(
     flag_active_despite_terminated = FALSE,
     flag_no_recent_activity        = FALSE,
+    flag_missing_outlay_data       = FALSE,
     flag_not_in_gw                 = TRUE
   )
   expect_equal(result, "untracked")
@@ -569,15 +606,43 @@ test_that("classify_discrepancy: normal when all flags FALSE", {
   result <- classify_discrepancy(
     flag_active_despite_terminated = FALSE,
     flag_no_recent_activity        = FALSE,
+    flag_missing_outlay_data       = FALSE,
     flag_not_in_gw                 = FALSE
   )
   expect_equal(result, "normal")
 })
 
 test_that("classify_discrepancy: returns a single character string", {
-  result <- classify_discrepancy(TRUE, FALSE, FALSE)
+  result <- classify_discrepancy(TRUE, FALSE, FALSE, FALSE)
   expect_type(result, "character")
   expect_length(result, 1L)
+})
+
+test_that("classify_discrepancy: non-research HHS sub_agency prevents possible_freeze → normal", {
+  # ACF (index 1) is the canonical non-research sub-agency in the constant
+  expect_equal(.cd(flag_no_recent_activity = TRUE,
+                   sub_agency = NON_RESEARCH_HHS_SUBAGENCIES[[1]]), "normal")
+})
+
+test_that("classify_discrepancy: non-research HHS sub_agency prevents possible_freeze_no_data → normal", {
+  # CMS (index 2) with missing outlay data should also resolve to normal
+  expect_equal(.cd(flag_no_recent_activity = TRUE, flag_missing_outlay_data = TRUE,
+                   sub_agency = NON_RESEARCH_HHS_SUBAGENCIES[[2]]), "normal")
+})
+
+test_that("classify_discrepancy: NIH sub_agency still classifies possible_freeze normally", {
+  expect_equal(.cd(flag_no_recent_activity = TRUE,
+                   sub_agency = "National Institutes of Health"), "possible_freeze")
+})
+
+test_that("classify_discrepancy: sub_agency=NA (default) does not suppress possible_freeze", {
+  expect_equal(.cd(flag_no_recent_activity = TRUE), "possible_freeze")
+})
+
+test_that("classify_discrepancy: non-research sub_agency does NOT suppress active_despite_terminated", {
+  # ADT fires before the non-research guard in case_when
+  expect_equal(.cd(flag_active_despite_terminated = TRUE,
+                   sub_agency = NON_RESEARCH_HHS_SUBAGENCIES[[1]]), "active_despite_terminated")
 })
 
 # ---------------------------------------------------------------------------
@@ -938,6 +1003,41 @@ test_that("USAspending requests 'Start Date'/'End Date' (not 'Period of Performa
   expect_true("End Date" %in% USASPENDING_FIELDS)
   expect_false("Period of Performance Start Date" %in% USASPENDING_FIELDS)
   expect_false("Period of Performance Current End Date" %in% USASPENDING_FIELDS)
+})
+
+test_that("USASPENDING_FIELDS includes the four high-value additional fields", {
+  # Recipient UEI: stable identifier replacing deprecated DUNS
+  expect_true("Recipient UEI" %in% USASPENDING_FIELDS)
+  # Last Modified Date: detect recent admin changes without full transaction scan
+  expect_true("Last Modified Date" %in% USASPENDING_FIELDS)
+  # def_codes: identifies COVID/IIJA emergency awards (political targeting signal)
+  expect_true("def_codes" %in% USASPENDING_FIELDS)
+  # generated_internal_id: direct File C lookup key (avoids reconstructing ASST_NON_{id}_{cgac})
+  expect_true("generated_internal_id" %in% USASPENDING_FIELDS)
+})
+
+test_that("def_codes array collapses to comma-separated string correctly", {
+  # Test the collapsing logic used in fetch_usaspending_page() inline
+  dc_list <- list("L", "M")
+  result  <- paste(unlist(dc_list), collapse = ",")
+  expect_equal(result, "L,M")
+
+  # NULL def_codes (no emergency funding) → NA_character_
+  dc_null <- NULL
+  result_null <- if (is.null(dc_null) || length(dc_null) == 0L) NA_character_
+                 else paste(unlist(dc_null), collapse = ",")
+  expect_true(is.na(result_null))
+
+  # Single code
+  dc_single <- list("B")
+  result_single <- paste(unlist(dc_single), collapse = ",")
+  expect_equal(result_single, "B")
+})
+
+test_that("USASPENDING_FIELDS does not contain deprecated DUNS field", {
+  # DUNS is deprecated in favor of UEI as of April 2022
+  expect_false("Recipient DUNS Number" %in% USASPENDING_FIELDS)
+  expect_true("Recipient UEI" %in% USASPENDING_FIELDS)
 })
 
 test_that("no R files use req_body_raw with jsonlite::toJSON", {
@@ -1373,4 +1473,691 @@ test_that("validate_notices accepts valid NIH grant number formats", {
   result <- suppressMessages(validate_notices(df))
   expect_false(result$flag_bad_grant_number[1])
   expect_false(result$flag_bad_grant_number[2])
+})
+
+# ===========================================================================
+# fetch_gw.R — File C outlay parser
+# ===========================================================================
+
+test_that("parse_file_c_outlays parses standard format", {
+  input <- "- Oct/Nov 2024: $5,834,240\n- Dec 2024: $1,142,547"
+  result <- parse_file_c_outlays(input)
+  expect_equal(nrow(result), 2L)
+  expect_equal(result$amount[1], 5834240)
+  expect_equal(result$amount[2], 1142547)
+  expect_s3_class(result$period_date, "Date")
+})
+
+test_that("parse_file_c_outlays handles single period", {
+  result <- parse_file_c_outlays("- Jan 2025: $100")
+  expect_equal(nrow(result), 1L)
+  expect_equal(result$amount, 100)
+  expect_equal(result$period, "Jan 2025")
+})
+
+test_that("parse_file_c_outlays returns empty tibble for NA/empty input", {
+  expect_equal(nrow(parse_file_c_outlays(NA_character_)), 0L)
+  expect_equal(nrow(parse_file_c_outlays("")), 0L)
+  expect_equal(nrow(parse_file_c_outlays("  ")), 0L)
+})
+
+test_that("parse_file_c_outlays handles zero amounts", {
+  result <- parse_file_c_outlays("- Mar 2025: $0")
+  expect_equal(nrow(result), 1L)
+  expect_equal(result$amount, 0)
+})
+
+test_that("parse_file_c_outlays handles combined month periods", {
+  result <- parse_file_c_outlays("- Oct/Nov 2024: $500,000")
+  expect_equal(nrow(result), 1L)
+  expect_equal(result$period, "Oct/Nov 2024")
+  # period_date should be first month
+  expect_equal(format(result$period_date, "%m"), "10")
+})
+
+test_that(".parse_period_to_date converts month-year strings", {
+  dates <- .parse_period_to_date(c("Jan 2025", "Dec 2024", "Oct/Nov 2024"))
+  expect_equal(dates[1], as.Date("2025-01-01"))
+  expect_equal(dates[2], as.Date("2024-12-01"))
+  expect_equal(dates[3], as.Date("2024-10-01"))
+})
+
+# ===========================================================================
+# calibrate_freeze.R
+# ===========================================================================
+
+test_that("join_gw_usaspending joins on award ID", {
+  gw <- tibble::tibble(
+    gw_award_id = c("R01AI123456", "R01MH999999"),
+    gw_status = c("Frozen", "Terminated"),
+    ever_frozen = c(TRUE, FALSE)
+  )
+  ours <- tibble::tibble(
+    grant_number = c("R01AI123456", "U01CA000001"),
+    outlay_ratio = c(0.05, 0.80),
+    discrepancy_type = c("possible_freeze", "normal"),
+    award_amount = c(500000, 1000000)
+  )
+  result <- suppressMessages(join_gw_usaspending(gw, ours))
+  expect_equal(nrow(result), 1L)
+  expect_equal(result$gw_award_id, "R01AI123456")
+})
+
+test_that("compute_calibration_features creates expected columns", {
+  joined <- tibble::tibble(
+    gw_award_id = "R01AI123456",
+    gw_status = "\U0001f9ca Frozen Funding",
+    ever_frozen = TRUE,
+    targeted_start_date = as.Date("2025-03-01"),
+    targeted_end_date = as.Date(NA),
+    file_c_outlays_raw = "- Jan 2025: $100",
+    gw_total_award = 500000,
+    activity_code = "R01",
+    last_payment_date = as.Date("2025-01-15"),
+    outlay_ratio = 0.05,
+    elapsed_ratio = 0.30,
+    discrepancy_type = "possible_freeze",
+    freeze_confidence = "high",
+    days_since_last_transaction = 200L
+  )
+  result <- suppressMessages(compute_calibration_features(joined))
+  expect_true("gw_frozen" %in% names(result))
+  expect_true("activity_code_group" %in% names(result))
+  expect_true(result$gw_frozen)
+  expect_equal(result$activity_code_group, "R")
+})
+
+test_that("evaluate_heuristic returns expected structure", {
+  cal_data <- tibble::tibble(
+    gw_frozen = c(TRUE, TRUE, FALSE, FALSE, TRUE),
+    our_outlay_ratio = c(0.02, 0.05, 0.50, 0.80, 0.30),
+    our_elapsed_ratio = c(0.5, 0.7, 0.3, 0.9, 0.6),
+    our_freeze_flag = c(TRUE, TRUE, FALSE, FALSE, FALSE),
+    our_freeze_confidence = c("high", "high", "low", "low", "medium"),
+    org_name = rep("TEST UNIVERSITY", 5),
+    activity_code_group = rep("R", 5),
+    gw_status_detail = c("Frozen", "Frozen", "Normal", "Normal", "Frozen"),
+    gw_award_id = paste0("R01AI", 1:5),
+    discrepancy_type = c("possible_freeze", "possible_freeze", "normal", "normal", "normal"),
+    elapsed_ratio = c(0.5, 0.7, 0.3, 0.9, 0.6),
+    award_amount = rep(500000, 5)
+  )
+  result <- suppressMessages(evaluate_heuristic(cal_data))
+  expect_type(result, "list")
+  expect_true("confusion_matrix" %in% names(result))
+  expect_true("threshold_sweep" %in% names(result))
+  expect_true("optimal_threshold" %in% names(result))
+  expect_true("precision" %in% names(result))
+  expect_true("recall" %in% names(result))
+})
+
+test_that(".compute_auc returns sensible values", {
+  # Perfect separation
+  expect_equal(.compute_auc(c(0.9, 0.8, 0.1, 0.2), c(1, 1, 0, 0)), 1.0)
+  # Random
+  expect_true(.compute_auc(c(0.5, 0.5, 0.5, 0.5), c(1, 1, 0, 0)) == 0.5)
+  # Edge: empty
+
+  expect_true(is.na(.compute_auc(numeric(0), numeric(0))))
+})
+
+# ===========================================================================
+# De-obligation detection (transform.R)
+# ===========================================================================
+
+test_that("detect_deobligations identifies negative obligations", {
+  txns <- tibble::tibble(
+    grant_number = c("R01AI1", "R01AI1", "R01AI1", "R01AI2"),
+    transaction_date = as.Date(c("2025-01-15", "2025-02-15", "2025-03-15", "2025-01-20")),
+    obligation_amount = c(-5000, -3000, 1000, -2000),
+    transaction_desc = rep("test", 4),
+    action_type = rep("B", 4),
+    modification_number = rep("1", 4)
+  )
+  result <- suppressMessages(detect_deobligations(txns, min_amount = 1000, min_events = 2L))
+  # R01AI1 has 2 de-obligations > $1000, R01AI2 has 1
+  expect_equal(nrow(result), 2L)
+  flagged <- result |> dplyr::filter(deobligation_flag)
+  expect_equal(nrow(flagged), 1L)
+  expect_equal(flagged$grant_number, "R01AI1")
+  expect_equal(flagged$n_deobligations, 2L)
+  expect_true(flagged$total_deobligated < 0)
+})
+
+test_that("detect_deobligations handles empty transactions", {
+  result <- suppressMessages(detect_deobligations(
+    dplyr::tibble(
+      grant_number = character(0), transaction_date = as.Date(character(0)),
+      obligation_amount = double(0), transaction_desc = character(0),
+      action_type = character(0), modification_number = character(0)
+    )
+  ))
+  expect_equal(nrow(result), 0L)
+})
+
+test_that("detect_deobligations ignores small adjustments", {
+  txns <- tibble::tibble(
+    grant_number = "R01AI1",
+    transaction_date = as.Date("2025-01-15"),
+    obligation_amount = -500,  # below default threshold of 1000
+    transaction_desc = "test",
+    action_type = "B",
+    modification_number = "1"
+  )
+  result <- suppressMessages(detect_deobligations(txns))
+  expect_equal(nrow(result), 0L)
+})
+
+test_that("detect_deobligation_spikes aggregates by agency-month", {
+  txns <- tibble::tibble(
+    grant_number = c("R01AI1", "R01AI2", "R01AI3", "R01AI4"),
+    transaction_date = as.Date(c("2025-01-15", "2025-01-20", "2025-01-25", "2025-02-15")),
+    obligation_amount = c(-5000, -3000, -4000, -1000),
+    transaction_desc = rep("test", 4),
+    action_type = rep("B", 4),
+    modification_number = rep("1", 4)
+  )
+  discrepancies <- tibble::tibble(
+    grant_number = c("R01AI1", "R01AI2", "R01AI3", "R01AI4"),
+    agency_name = rep("Department of Health and Human Services", 4)
+  )
+  result <- suppressMessages(detect_deobligation_spikes(txns, discrepancies))
+  expect_true(nrow(result) > 0L)
+  expect_true("year_month" %in% names(result))
+  expect_true("spike_flag" %in% names(result))
+})
+
+# ===========================================================================
+# Subaward analysis (transform.R)
+# ===========================================================================
+
+test_that("analyze_subaward_flow detects frozen grants with subawards", {
+  subs <- tibble::tibble(
+    subaward_id = c("SUB1", "SUB2"),
+    subawardee_name = c("SMALL COLLEGE", "RESEARCH INST"),
+    subaward_date = as.Date(c("2025-02-01", "2025-03-01")),
+    subaward_amount = c(50000, 75000),
+    prime_award_id = c("R01AI1", "R01AI1"),
+    prime_recipient = c("BIG UNIVERSITY", "BIG UNIVERSITY"),
+    agency_name = rep("HHS", 2),
+    sub_agency = rep("NIH", 2)
+  )
+  disc <- tibble::tibble(
+    grant_number = c("R01AI1", "R01AI2"),
+    discrepancy_type = c("possible_freeze", "normal"),
+    outlay_ratio = c(0.03, 0.85),
+    freeze_confidence = c("high", NA),
+    award_amount = c(1000000, 500000)
+  )
+  result <- suppressMessages(analyze_subaward_flow(subs, disc))
+  expect_equal(result$n_subawards, 2L)
+  expect_equal(nrow(result$frozen_with_subawards), 1L)
+  expect_equal(result$frozen_with_subawards$prime_award_id, "R01AI1")
+  expect_equal(result$frozen_with_subawards$total_subaward_amount, 125000)
+  expect_equal(nrow(result$downstream_institutions), 2L)
+})
+
+test_that("analyze_subaward_flow handles empty subawards", {
+  result <- suppressMessages(analyze_subaward_flow(
+    dplyr::tibble(
+      subaward_id = character(0), subawardee_name = character(0),
+      subaward_date = as.Date(character(0)), subaward_amount = double(0),
+      prime_award_id = character(0), prime_recipient = character(0),
+      agency_name = character(0), sub_agency = character(0)
+    ),
+    dplyr::tibble(grant_number = "X", discrepancy_type = "normal",
+                  outlay_ratio = 0.5, freeze_confidence = NA, award_amount = 100)
+  ))
+  expect_equal(result$n_subawards, 0L)
+})
+
+
+# ===========================================================================
+# fetch_usaspending_budget.R — CFDA, award flow, agency obligations
+# ===========================================================================
+test_that(".empty_cfda_tibble has correct schema", {
+  tbl <- .empty_cfda_tibble()
+  expect_s3_class(tbl, "tbl_df")
+  expect_equal(nrow(tbl), 0L)
+  expect_type(tbl$agency_label,      "character")
+  expect_type(tbl$cfda_code,         "character")
+  expect_type(tbl$cfda_name,         "character")
+  expect_type(tbl$obligation_amount, "double")
+})
+
+test_that("SPENDING_BY_CATEGORY_BASE points to correct endpoint", {
+  expect_true(grepl("spending_by_category", SPENDING_BY_CATEGORY_BASE))
+  expect_true(grepl("api.usaspending.gov", SPENDING_BY_CATEGORY_BASE))
+})
+
+# ===========================================================================
+# fetch_award_obligations_flow() helpers
+# (fetch_usaspending_budget.R — spending_over_time new grant flow)
+# ===========================================================================
+
+test_that(".empty_award_flow_tibble has correct schema", {
+  tbl <- .empty_award_flow_tibble()
+  expect_s3_class(tbl, "tbl_df")
+  expect_equal(nrow(tbl), 0L)
+  expect_type(tbl$agency,                    "character")
+  expect_type(tbl$fiscal_year,               "integer")
+  expect_type(tbl$fiscal_period,             "integer")
+  expect_type(tbl$monthly_grant_obligations, "double")
+})
+
+test_that(".parse_spending_over_time returns empty tibble for empty results", {
+  raw <- list(results = list(), group = "month")
+  result <- .parse_spending_over_time(raw, "National Science Foundation")
+  expect_s3_class(result, "tbl_df")
+  expect_equal(nrow(result), 0L)
+})
+
+test_that(".parse_spending_over_time correctly maps fiscal year and period", {
+  # month=1 means fiscal P1 (October), fiscal_year="2026" means FY2026
+  raw <- list(
+    results = list(
+      list(
+        time_period = list(fiscal_year = "2026", month = "1"),
+        Grant_Obligations = 0.0,
+        aggregated_amount = 0.0
+      ),
+      list(
+        time_period = list(fiscal_year = "2026", month = "2"),
+        Grant_Obligations = 668550.0,
+        aggregated_amount = 668550.0
+      )
+    )
+  )
+  result <- .parse_spending_over_time(raw, "National Science Foundation")
+  expect_equal(nrow(result), 2L)
+  expect_equal(result$fiscal_year,   c(2026L, 2026L))
+  expect_equal(result$fiscal_period, c(1L,    2L))       # fiscal months, not calendar
+  expect_equal(result$monthly_grant_obligations, c(0.0, 668550.0))
+  expect_equal(result$agency, rep("National Science Foundation", 2L))
+})
+
+test_that(".parse_spending_over_time handles NULL Grant_Obligations as NA", {
+  raw <- list(
+    results = list(
+      list(
+        time_period = list(fiscal_year = "2026", month = "3"),
+        Grant_Obligations = NULL,
+        aggregated_amount = NULL
+      )
+    )
+  )
+  result <- .parse_spending_over_time(raw, "NSF")
+  expect_equal(nrow(result), 1L)
+  expect_true(is.na(result$monthly_grant_obligations))
+})
+
+test_that("SPENDING_OVER_TIME_URL points to correct endpoint", {
+  expect_true(grepl("spending_over_time", SPENDING_OVER_TIME_URL))
+  expect_true(grepl("api.usaspending.gov", SPENDING_OVER_TIME_URL))
+})
+
+test_that("GRANT_AWARD_TYPE_CODES includes grants and cooperative agreements", {
+  expect_true("02" %in% GRANT_AWARD_TYPE_CODES)  # block grants
+  expect_true("03" %in% GRANT_AWARD_TYPE_CODES)  # formula grants
+  expect_true("04" %in% GRANT_AWARD_TYPE_CODES)  # project grants
+  expect_true("05" %in% GRANT_AWARD_TYPE_CODES)  # cooperative agreements
+})
+
+# ===========================================================================
+# extract_termination_actions() + detect_reinstatement_pattern()
+# (fetch_usaspending.R — USAspending transaction intelligence)
+# ===========================================================================
+
+test_that("extract_termination_actions returns empty tibble for empty input", {
+  empty_txns <- dplyr::tibble(
+    grant_number = character(0), transaction_date = as.Date(character(0)),
+    obligation_amount = double(0), transaction_desc = character(0),
+    action_type = character(0), modification_number = character(0)
+  )
+  result <- suppressMessages(extract_termination_actions(empty_txns))
+  expect_s3_class(result, "tbl_df")
+  expect_equal(nrow(result), 0L)
+  expect_true("termination_action_date" %in% names(result))
+  expect_true("termination_action_type" %in% names(result))
+})
+
+test_that("extract_termination_actions filters to E and F action types only", {
+  txns <- dplyr::tibble(
+    grant_number      = c("R01A", "R01A", "R01B", "R01C"),
+    transaction_date  = as.Date(c("2025-01-15", "2025-02-01", "2025-01-20", "2025-03-01")),
+    obligation_amount = c(-5000, 1000, -3000, 2000),
+    transaction_desc  = rep("test", 4),
+    action_type       = c("E", "B", "F", "A"),  # E, F = termination; B, A = continuation
+    modification_number = c("2", "3", "1", "1")
+  )
+  result <- suppressMessages(extract_termination_actions(txns))
+  # Only R01A (E) and R01B (F) should appear; R01C (A) is not a termination
+  expect_equal(nrow(result), 2L)
+  expect_true(all(result$termination_action_type %in% c("E", "F")))
+  expect_false("R01C" %in% result$grant_number)
+})
+
+test_that("extract_termination_actions returns most recent termination per grant", {
+  txns <- dplyr::tibble(
+    grant_number      = c("R01A", "R01A"),
+    transaction_date  = as.Date(c("2025-01-15", "2025-03-10")),
+    obligation_amount = c(-5000, -2000),
+    transaction_desc  = rep("test", 2),
+    action_type       = c("E", "E"),
+    modification_number = c("2", "3")
+  )
+  result <- suppressMessages(extract_termination_actions(txns))
+  expect_equal(nrow(result), 1L)
+  expect_equal(result$termination_action_date, as.Date("2025-03-10"))
+  expect_equal(result$termination_mod_number, "3")
+})
+
+test_that("TERMINATION_ACTION_TYPES includes E and F", {
+  expect_true("E" %in% TERMINATION_ACTION_TYPES)
+  expect_true("F" %in% TERMINATION_ACTION_TYPES)
+  expect_equal(length(TERMINATION_ACTION_TYPES), 2L)
+})
+
+test_that("detect_reinstatement_pattern returns empty tibble for empty input", {
+  empty_txns <- dplyr::tibble(
+    grant_number = character(0), transaction_date = as.Date(character(0)),
+    obligation_amount = double(0), transaction_desc = character(0),
+    action_type = character(0), modification_number = character(0)
+  )
+  result <- suppressMessages(detect_reinstatement_pattern(empty_txns))
+  expect_s3_class(result, "tbl_df")
+  expect_equal(nrow(result), 0L)
+  expected_cols <- c("grant_number", "termination_action_date",
+                     "reinstatement_action_date", "reinstatement_action_type")
+  expect_true(all(expected_cols %in% names(result)))
+})
+
+test_that("detect_reinstatement_pattern detects E followed by A", {
+  txns <- dplyr::tibble(
+    grant_number      = c("R01A", "R01A", "R01B"),
+    transaction_date  = as.Date(c("2025-01-15", "2025-04-01", "2025-02-01")),
+    obligation_amount = c(-5000, 3000, -4000),
+    transaction_desc  = rep("test", 3),
+    action_type       = c("E", "A", "F"),  # R01A: terminated then reinstated; R01B: terminated only
+    modification_number = c("2", "3", "1")
+  )
+  result <- suppressMessages(detect_reinstatement_pattern(txns))
+  expect_equal(nrow(result), 1L)
+  expect_equal(result$grant_number, "R01A")
+  expect_equal(result$termination_action_date, as.Date("2025-01-15"))
+  expect_equal(result$reinstatement_action_date, as.Date("2025-04-01"))
+  expect_equal(result$reinstatement_action_type, "A")
+})
+
+test_that("detect_reinstatement_pattern does not flag grants with no post-termination activity", {
+  txns <- dplyr::tibble(
+    grant_number      = c("R01A", "R01B"),
+    transaction_date  = as.Date(c("2025-01-15", "2025-02-01")),
+    obligation_amount = c(-5000, -4000),
+    transaction_desc  = rep("test", 2),
+    action_type       = c("E", "F"),
+    modification_number = c("2", "1")
+  )
+  result <- suppressMessages(detect_reinstatement_pattern(txns))
+  expect_equal(nrow(result), 0L)
+})
+
+# ===========================================================================
+# confirm_post_termination_activity() (transform.R — Option A)
+# ===========================================================================
+
+test_that("confirm_post_termination_activity returns empty for empty file_c_data", {
+  result <- suppressMessages(confirm_post_termination_activity(
+    file_c_data   = .empty_file_c_tibble(),
+    discrepancies = dplyr::tibble(grant_number = "R01A", notice_date = as.Date("2025-01-01"))
+  ))
+  expect_s3_class(result, "tbl_df")
+  expect_equal(nrow(result), 0L)
+})
+
+test_that("confirm_post_termination_activity returns empty for empty discrepancies", {
+  file_c <- dplyr::tibble(
+    grant_number    = "R01A",
+    reporting_date  = as.Date("2025-07-01"),
+    reporting_year  = 2025L, reporting_month = 7L,
+    outlay_amount   = 5000, obligated_amount = 0
+  )
+  result <- suppressMessages(confirm_post_termination_activity(
+    file_c_data   = file_c,
+    discrepancies = dplyr::tibble(grant_number = character(0), notice_date = as.Date(character(0)))
+  ))
+  expect_equal(nrow(result), 0L)
+})
+
+test_that("confirm_post_termination_activity flags outlays beyond 120-day window", {
+  # Grant terminated 2025-01-01. Closeout deadline = 2025-05-01.
+  # File C shows outlay on 2025-07-01 (61 days AFTER closeout) => should flag.
+  file_c <- dplyr::tibble(
+    grant_number    = c("R01A", "R01A"),
+    reporting_date  = as.Date(c("2025-03-01", "2025-07-01")),  # within / beyond closeout
+    reporting_year  = c(2025L, 2025L),
+    reporting_month = c(3L, 7L),
+    outlay_amount   = c(500, 5000),
+    obligated_amount = c(0, 0)
+  )
+  disc <- dplyr::tibble(
+    grant_number = "R01A",
+    notice_date  = as.Date("2025-01-01")
+  )
+  result <- suppressMessages(confirm_post_termination_activity(file_c, disc))
+  expect_equal(nrow(result), 1L)
+  expect_true(result$flag_confirmed_post_termination_outlays)
+  expect_equal(result$n_post_termination_periods, 1L)  # Only July counts; March is within window
+  expect_equal(result$post_termination_total_outlays, 5000)
+})
+
+test_that("confirm_post_termination_activity does NOT flag outlays within 120-day window", {
+  # Grant terminated 2025-01-01. Closeout deadline = 2025-05-01.
+  # File C shows outlay on 2025-03-01 (within window) => should NOT flag.
+  file_c <- dplyr::tibble(
+    grant_number    = "R01A",
+    reporting_date  = as.Date("2025-03-01"),
+    reporting_year  = 2025L, reporting_month = 3L,
+    outlay_amount   = 500, obligated_amount = 0
+  )
+  disc <- dplyr::tibble(
+    grant_number = "R01A",
+    notice_date  = as.Date("2025-01-01")
+  )
+  result <- suppressMessages(confirm_post_termination_activity(file_c, disc))
+  expect_equal(nrow(result), 1L)
+  expect_false(result$flag_confirmed_post_termination_outlays)
+  expect_equal(result$n_post_termination_periods, 0L)
+})
+
+test_that("confirm_post_termination_activity output has required columns", {
+  result <- suppressMessages(confirm_post_termination_activity(
+    file_c_data   = .empty_file_c_tibble(),
+    discrepancies = dplyr::tibble(grant_number = character(0),
+                                  notice_date  = as.Date(character(0)))
+  ))
+  expected_cols <- c(
+    "grant_number", "flag_confirmed_post_termination_outlays",
+    "n_post_termination_periods", "post_termination_total_outlays",
+    "post_termination_first_date", "post_termination_last_date"
+  )
+  expect_true(all(expected_cols %in% names(result)))
+})
+
+# ===========================================================================
+# fetch_subaward_impact() — spending_by_subaward_grouped
+# (fetch_usaspending.R)
+# ===========================================================================
+
+test_that(".empty_subaward_impact_tibble has correct schema", {
+  tbl <- .empty_subaward_impact_tibble()
+  expect_s3_class(tbl, "tbl_df")
+  expect_equal(nrow(tbl), 0L)
+  expect_type(tbl$award_id,                    "character")
+  expect_type(tbl$subaward_count,              "integer")
+  expect_type(tbl$subaward_obligation,         "double")
+  expect_type(tbl$award_generated_internal_id, "character")
+})
+
+test_that(".parse_subaward_impact_records: well-formed records produce correct values", {
+  records <- list(
+    list(
+      award_id                    = "R01AI123456",
+      subaward_count              = 3L,
+      subaward_obligation         = 150000.0,
+      award_generated_internal_id = "ASST_NON_R01AI123456_075"
+    ),
+    list(
+      award_id                    = "2301234",
+      subaward_count              = 1L,
+      subaward_obligation         = 45000.0,
+      award_generated_internal_id = "ASST_NON_2301234_049"
+    )
+  )
+  result <- .parse_subaward_impact_records(records)
+  expect_equal(nrow(result), 2L)
+  expect_equal(result$award_id[1], "R01AI123456")
+  expect_equal(result$subaward_count[1], 3L)
+  expect_equal(result$subaward_obligation[1], 150000.0)
+  expect_equal(result$award_generated_internal_id[1], "ASST_NON_R01AI123456_075")
+})
+
+test_that(".parse_subaward_impact_records: empty input returns empty tibble", {
+  result <- .parse_subaward_impact_records(list())
+  expect_s3_class(result, "tbl_df")
+  expect_equal(nrow(result), 0L)
+  expect_true("award_id" %in% names(result))
+  expect_true("subaward_count" %in% names(result))
+})
+
+test_that(".parse_subaward_impact_records: missing fields become NA", {
+  records <- list(
+    list(
+      award_id = "R01TEST"
+      # subaward_count, subaward_obligation, award_generated_internal_id all missing
+    )
+  )
+  result <- .parse_subaward_impact_records(records)
+  expect_equal(nrow(result), 1L)
+  expect_true(is.na(result$subaward_count[1]))
+  expect_true(is.na(result$subaward_obligation[1]))
+  expect_true(is.na(result$award_generated_internal_id[1]))
+})
+
+test_that("fetch_subaward_impact with empty award_ids returns empty tibble", {
+  result <- suppressMessages(fetch_subaward_impact(character(0)))
+  expect_s3_class(result, "tbl_df")
+  expect_equal(nrow(result), 0L)
+  expect_true("subaward_count" %in% names(result))
+})
+
+test_that("fetch_subaward_impact drops NA award IDs silently", {
+  # NA-only input should return empty tibble, not error
+  result <- suppressMessages(fetch_subaward_impact(c(NA_character_, NA_character_)))
+  expect_equal(nrow(result), 0L)
+})
+
+test_that("SUBAWARD_GROUPED_URL points to correct endpoint", {
+  expect_true(grepl("subaward", SUBAWARD_GROUPED_URL))
+  expect_true(grepl("api.usaspending.gov", SUBAWARD_GROUPED_URL))
+})
+
+# ===========================================================================
+# enrich_with_emergency_flags() — def_codes political targeting signal
+# (transform.R)
+# ===========================================================================
+
+test_that("enrich_with_emergency_flags adds flag_emergency_exempt column", {
+  disc <- dplyr::tibble(
+    grant_number     = c("R01A", "R01B"),
+    discrepancy_type = c("possible_freeze", "normal"),
+    def_codes        = c("A,B", NA_character_)
+  )
+  result <- suppressMessages(enrich_with_emergency_flags(disc))
+  expect_true("flag_emergency_exempt" %in% names(result))
+  expect_equal(nrow(result), 2L)
+})
+
+test_that("enrich_with_emergency_flags flags frozen grant with def_codes", {
+  disc <- dplyr::tibble(
+    grant_number     = "R01FROZEN",
+    discrepancy_type = "possible_freeze",
+    def_codes        = "L,M"    # ARP emergency codes
+  )
+  result <- suppressMessages(enrich_with_emergency_flags(disc))
+  expect_true(result$flag_emergency_exempt[1])
+})
+
+test_that("enrich_with_emergency_flags does NOT flag normal grants with def_codes", {
+  disc <- dplyr::tibble(
+    grant_number     = "R01NORMAL",
+    discrepancy_type = "normal",
+    def_codes        = "A,B"
+  )
+  result <- suppressMessages(enrich_with_emergency_flags(disc))
+  expect_false(result$flag_emergency_exempt[1])
+})
+
+test_that("enrich_with_emergency_flags does NOT flag freeze grants without def_codes", {
+  disc <- dplyr::tibble(
+    grant_number     = c("R01A", "R01B"),
+    discrepancy_type = c("possible_freeze", "active_despite_terminated"),
+    def_codes        = c(NA_character_, NA_character_)
+  )
+  result <- suppressMessages(enrich_with_emergency_flags(disc))
+  expect_false(result$flag_emergency_exempt[1])
+  expect_false(result$flag_emergency_exempt[2])
+})
+
+test_that("enrich_with_emergency_flags uses usaspending_awards as def_codes source", {
+  disc <- dplyr::tibble(
+    grant_number     = c("R01A", "R01B"),
+    discrepancy_type = c("possible_freeze", "normal")
+    # no def_codes column
+  )
+  awards <- dplyr::tibble(
+    grant_number = c("R01A", "R01B"),
+    def_codes    = c("Z", NA_character_)   # Z = Families First COVID code
+  )
+  result <- suppressMessages(enrich_with_emergency_flags(disc, usaspending_awards = awards))
+  expect_true("flag_emergency_exempt" %in% names(result))
+  expect_true(result$flag_emergency_exempt[1])   # R01A: frozen + COVID def_code
+  expect_false(result$flag_emergency_exempt[2])  # R01B: normal
+})
+
+test_that("enrich_with_emergency_flags awards source overrides embedded def_codes", {
+  # discrepancies has def_codes column but awards has updated info — awards wins
+  disc <- dplyr::tibble(
+    grant_number     = "R01A",
+    discrepancy_type = "possible_freeze",
+    def_codes        = NA_character_   # stale: no codes
+  )
+  awards <- dplyr::tibble(
+    grant_number = "R01A",
+    def_codes    = "N"                 # fresh: ARP code
+  )
+  result <- suppressMessages(enrich_with_emergency_flags(disc, usaspending_awards = awards))
+  expect_true(result$flag_emergency_exempt[1])
+})
+
+test_that("enrich_with_emergency_flags does NOT flag IIJA-only (Q) freeze grants", {
+  # Q (IIJA) appears on ~82% of awards — too ubiquitous to be a targeting signal
+  disc <- dplyr::tibble(
+    grant_number     = "R01X",
+    discrepancy_type = "possible_freeze",
+    def_codes        = "Q"
+  )
+  result <- suppressMessages(enrich_with_emergency_flags(disc))
+  expect_false(result$flag_emergency_exempt[1])
+})
+
+test_that("enrich_with_emergency_flags handles empty input gracefully", {
+  empty_disc <- dplyr::tibble(
+    grant_number     = character(0),
+    discrepancy_type = character(0),
+    def_codes        = character(0)
+  )
+  result <- suppressMessages(enrich_with_emergency_flags(empty_disc))
+  expect_equal(nrow(result), 0L)
+  expect_true("flag_emergency_exempt" %in% names(result))
 })
