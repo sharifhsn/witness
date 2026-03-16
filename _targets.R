@@ -19,7 +19,6 @@ tar_option_set(packages = c(
   "maps",       # state choropleth base data
   "mapproj",    # coord_map() projection support
   "tidyr",      # calibration analysis (unnest)
-  "slider",     # rolling window (detect_obligation_drought.R, feature/macro-signals)
   "rlang"       # tidy evaluation (File C temporal features)
 ))
 
