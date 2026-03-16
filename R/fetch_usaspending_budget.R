@@ -602,6 +602,7 @@ fetch_recipient_compression <- function(
     agency_label, baseline_start, baseline_end, current_start, current_end, n_recipients
   ))
 
+  # Both calls are independent — no data dependency between baseline and current.
   baseline <- .fetch_recipient_top_n(
     agency_spec, baseline_start, baseline_end,
     award_type_codes, n_recipients, label = sprintf("%s baseline", agency_label)
@@ -616,11 +617,23 @@ fetch_recipient_compression <- function(
     return(.empty_compression_tibble())
   }
 
-  # Cutoff floor: minimum obligation amount in current top-N
-  # Institutions below this threshold will be flagged below_cutoff
-  cutoff_floor_M <- if (nrow(current) > 0L) min(current$amount_M, na.rm = TRUE) else 0
+  # Guard against duplicate recipient_ids from API (would cause row multiplication in joins)
+  baseline <- dplyr::distinct(baseline, recipient_id, .keep_all = TRUE)
+  current  <- dplyr::distinct(current,  recipient_id, .keep_all = TRUE)
+
+  # Cutoff floor: minimum obligation amount in current top-N.
+  # Institutions absent from current have spending somewhere in [0, cutoff_floor_M].
+  cutoff_floor_M <- if (nrow(current) > 0L) {
+    m <- min(current$amount_M, na.rm = TRUE)
+    if (is.infinite(m)) 0 else m
+  } else 0
 
   # --- Join: primary on recipient_id (UUID), fallback on normalized name ---
+  # Normalize once per dataset, reuse throughout to avoid repeated string ops.
+  normalize_name <- function(x) {
+    toupper(trimws(gsub("[,.'\\-]", " ", gsub("\\s+", " ", x))))
+  }
+  baseline$name_key <- normalize_name(baseline$recipient_name)
 
   # Attempt 1: inner-join on recipient_id where both sides have non-NA id
   base_with_id    <- baseline[!is.na(baseline$recipient_id), ]
@@ -638,31 +651,28 @@ fetch_recipient_compression <- function(
   ]
 
   # Attempt 2: name-normalized join for remaining
-  normalize_name <- function(x) {
-    toupper(trimws(gsub("[,.'\\-]", " ", gsub("\\s+", " ", x))))
-  }
-  unmatched_base$name_key <- normalize_name(unmatched_base$recipient_name)
   current_norm <- current |>
     dplyr::filter(!recipient_id %in% id_matched$recipient_id | is.na(recipient_id)) |>
     dplyr::mutate(name_key = normalize_name(recipient_name)) |>
-    dplyr::select(name_key, current_M = amount_M, recipient_id)
+    dplyr::select(name_key, current_M = amount_M)
 
-  name_matched <- dplyr::inner_join(
-    unmatched_base |> dplyr::rename(baseline_M = amount_M) |>
-      dplyr::select(-name_key, name_key),
-    current_norm |> dplyr::select(name_key, current_M),
+  name_matched_raw <- dplyr::inner_join(
+    unmatched_base |> dplyr::rename(baseline_M = amount_M),
+    current_norm,
     by = "name_key"
-  ) |>
+  )
+  matched_name_keys <- name_matched_raw$name_key  # save before dropping column
+  name_matched <- name_matched_raw |>
     dplyr::select(-name_key) |>
     dplyr::mutate(join_method = "name")
 
-  # Remaining: in baseline top-N but not in current top-N (below_cutoff)
-  matched_ids <- c(id_matched$recipient_id, name_matched$recipient_id)
+  # Remaining: in baseline top-N but not in current top-N (below_cutoff).
+  # Reuse name_key already stored on baseline — no recomputation.
   unmatched_final <- baseline[
-    !baseline$recipient_id %in% matched_ids &
-      !normalize_name(baseline$recipient_name) %in%
-        normalize_name(name_matched$recipient_name),
+    !baseline$recipient_id %in% c(id_matched$recipient_id, name_matched$recipient_id) &
+      !baseline$name_key %in% matched_name_keys,
   ] |>
+    dplyr::select(-name_key) |>
     dplyr::rename(baseline_M = amount_M) |>
     dplyr::mutate(current_M = NA_real_, join_method = "none")
 
@@ -671,7 +681,6 @@ fetch_recipient_compression <- function(
   result <- combined |>
     dplyr::mutate(
       below_cutoff   = is.na(current_M),
-      current_M      = dplyr::if_else(below_cutoff, NA_real_, current_M),
       yoy_pct        = dplyr::if_else(
         below_cutoff | is.na(baseline_M) | baseline_M == 0,
         NA_real_,
@@ -681,7 +690,7 @@ fetch_recipient_compression <- function(
                                       round(baseline_M - current_M, 2)),
       cutoff_floor_M = cutoff_floor_M
     ) |>
-    dplyr::arrange(dplyr::coalesce(yoy_pct, -Inf)) |>
+    dplyr::arrange(below_cutoff, yoy_pct) |>
     dplyr::select(
       recipient_name, recipient_id, baseline_M, current_M,
       yoy_pct, drop_M, below_cutoff, cutoff_floor_M, join_method

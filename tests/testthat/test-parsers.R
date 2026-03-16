@@ -1830,15 +1830,33 @@ test_that(".empty_recipient_top_n has correct schema", {
   expect_true(is.double(tbl$amount_M))
 })
 
-test_that("fetch_recipient_compression with empty baseline returns empty tibble", {
-  # Arrange: empty baseline (no results from API stub)
-  # We test the internal logic by providing zero-row data
-  empty_baseline <- .empty_recipient_top_n()
-  empty_current  <- .empty_recipient_top_n()
+test_that("recipient_id join succeeds: matched row has join_method=recipient_id, not below_cutoff", {
+  # Exercise the join path using the same logic as fetch_recipient_compression()
+  baseline <- dplyr::tibble(
+    recipient_id   = c("uuid-A", "uuid-B"),
+    recipient_name = c("ALPHA UNIV", "BETA HOSPITAL"),
+    amount_M       = c(80.0, 40.0)
+  )
+  current <- dplyr::tibble(
+    recipient_id   = "uuid-A",
+    recipient_name = "ALPHA UNIV",
+    amount_M       = 50.0
+  )
 
-  # We can't call the live API in tests, but we can verify the sentinels
-  expect_equal(nrow(empty_baseline), 0L)
-  expect_equal(ncol(.empty_compression_tibble()), 9L)
+  id_matched <- dplyr::inner_join(
+    baseline |> dplyr::rename(baseline_M = amount_M),
+    current  |> dplyr::select(recipient_id, current_M = amount_M),
+    by = "recipient_id"
+  ) |> dplyr::mutate(join_method = "recipient_id")
+
+  expect_equal(nrow(id_matched), 1L)
+  expect_equal(id_matched$join_method, "recipient_id")
+  expect_equal(id_matched$current_M, 50.0)
+
+  # uuid-B is unmatched → should become below_cutoff
+  unmatched <- baseline[!baseline$recipient_id %in% id_matched$recipient_id, ]
+  expect_equal(nrow(unmatched), 1L)
+  expect_equal(unmatched$recipient_name, "BETA HOSPITAL")
 })
 
 test_that("recipient compression yoy_pct computed correctly", {

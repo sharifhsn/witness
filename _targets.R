@@ -243,18 +243,20 @@ list(
   # continuation-year fundings + amendments). Not lifetime award face value.
   tar_target(
     recipient_compression,
-    dplyr::bind_rows(
-      fetch_recipient_compression(
-        agency_spec    = list(type = "awarding", tier = "subtier",
-                              name = "National Institutes of Health"),
-        baseline_start = "2024-10-01", baseline_end = "2025-03-31",
-        current_start  = "2025-10-01"
-      ),
-      fetch_recipient_compression(
-        agency_spec    = list(type = "awarding", tier = "toptier",
-                              name = "National Science Foundation"),
-        baseline_start = "2024-10-01", baseline_end = "2025-03-31",
-        current_start  = "2025-10-01"
+    .rds_or("recipient_compression", function()
+      dplyr::bind_rows(
+        fetch_recipient_compression(
+          agency_spec    = list(type = "awarding", tier = "subtier",
+                                name = "National Institutes of Health"),
+          baseline_start = "2024-10-01", baseline_end = "2025-03-31",
+          current_start  = "2025-10-01"
+        ),
+        fetch_recipient_compression(
+          agency_spec    = list(type = "awarding", tier = "toptier",
+                                name = "National Science Foundation"),
+          baseline_start = "2024-10-01", baseline_end = "2025-03-31",
+          current_start  = "2025-10-01"
+        )
       )
     )
   )
