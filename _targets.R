@@ -248,13 +248,15 @@ list(
         fetch_recipient_compression(
           agency_spec    = list(type = "awarding", tier = "subtier",
                                 name = "National Institutes of Health"),
-          baseline_start = "2024-10-01", baseline_end = "2025-03-31",
+          baseline_start = "2024-10-01",
+          baseline_end   = format(Sys.Date() - 365, "%Y-%m-%d"),  # same window length as current
           current_start  = "2025-10-01"
         ),
         fetch_recipient_compression(
           agency_spec    = list(type = "awarding", tier = "toptier",
                                 name = "National Science Foundation"),
-          baseline_start = "2024-10-01", baseline_end = "2025-03-31",
+          baseline_start = "2024-10-01",
+          baseline_end   = format(Sys.Date() - 365, "%Y-%m-%d"),  # same window length as current
           current_start  = "2025-10-01"
         )
       )

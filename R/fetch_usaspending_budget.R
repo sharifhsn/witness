@@ -617,9 +617,12 @@ fetch_recipient_compression <- function(
     return(.empty_compression_tibble())
   }
 
-  # Guard against duplicate recipient_ids from API (would cause row multiplication in joins)
-  baseline <- dplyr::distinct(baseline, recipient_id, .keep_all = TRUE)
-  current  <- dplyr::distinct(current,  recipient_id, .keep_all = TRUE)
+  # Guard against duplicate recipient_ids from API (would cause row multiplication in joins).
+  # Use base R dedup instead of dplyr::distinct() — distinct() treats all NAs as equal and
+  # would silently drop institutions that share recipient_id=NA (no UEI/DUNS registration).
+  dedup_non_na <- function(df) df[!duplicated(df$recipient_id) | is.na(df$recipient_id), ]
+  baseline <- dedup_non_na(baseline)
+  current  <- dedup_non_na(current)
 
   # Cutoff floor: minimum obligation amount in current top-N.
   # Institutions absent from current have spending somewhere in [0, cutoff_floor_M].
